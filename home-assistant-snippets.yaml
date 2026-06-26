@@ -1,0 +1,34 @@
+# =====================================================================
+# Home Assistant configuration snippets for the label printer.
+# Replace 192.168.10.205 with YOUR Home Assistant device's LAN IP
+# (Settings > System > Network, or your router) -- this is the HA box,
+# NOT the printer.
+# =====================================================================
+
+# --- 1) Add to configuration.yaml -----------------------------------
+# Lets HA call the add-on's print endpoint.
+rest_command:
+  print_milk_label:
+    url: "http://192.168.10.205:8099/print"
+    method: POST
+    timeout: 30
+
+# --- 2) Automation (Settings > Automations, or automations.yaml) -----
+# Triggers a print when the Tapo S200D button is pressed.
+#
+# IMPORTANT: the trigger below is a PLACEHOLDER. The exact trigger depends
+# on how the HACS Tapo integration exposes your S200D. After installing it,
+# the easiest reliable way is to build the trigger in the UI:
+#   New Automation > Add Trigger > Device > (pick your S200D) > "Pressed".
+# If no device trigger is offered, watch Developer Tools > Events for the
+# event the integration emits when you press the button, and use an
+# "event" trigger on that. Then keep the action below.
+- alias: "Print breast-milk label on S200D press"
+  trigger:
+    - platform: device
+      domain: tapo
+      device_id: REPLACE_WITH_YOUR_S200D_DEVICE_ID
+      type: pressed
+  action:
+    - service: rest_command.print_milk_label
+  mode: single

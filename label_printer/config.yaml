@@ -1,0 +1,23 @@
+# Home Assistant local add-on manifest.
+# Place this whole "label_printer" folder under /addons on your HA box, then
+# Settings > Add-ons > Add-on Store > (three dots) > Check for updates / reload,
+# and "Breast Milk Label Printer" will appear under "Local add-ons".
+name: "Breast Milk Label Printer"
+version: "1.0.0"
+slug: "label_printer"
+description: "Prints a date/time + expiration label to a networked Brother QL-820NWB on demand."
+url: "https://github.com/jmartz/ha-label-printer-addon/tree/main/label_printer"
+arch:
+  - aarch64   # Raspberry Pi / HA Green / HA Yellow
+  - amd64     # Intel NUC / generic x86 mini-PC
+init: false
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: "HTTP print endpoint (POST /print)"
+options:
+  printer_ip: "192.168.10.83"
+  label: "62"
+schema:
+  printer_ip: str
+  label: str
