@@ -20,7 +20,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from PIL import Image, ImageDraw, ImageFont
 from brother_ql.conversion import convert
 from brother_ql.backends.helpers import send
@@ -134,7 +134,7 @@ def draw_moon(d, cx, cy, r):
 # Build the label image
 # ----------------------------------------------------------------------
 
-def build_label_image(now):
+def build_label_image(now, oz=None):
     header_text = f"{now:%a} | {now:%b} {now.day} | {fmt_time(now)}"
 
     room = now + timedelta(hours=4)        # room temp 77F/25C: 4 hours
@@ -155,8 +155,9 @@ def build_label_image(now):
 
     header_font = fitted_font([header_text], 72,
                               max_w=max_text_w - ICON_W - ICON_GAP)
-    amount_label, amount_unit = "Amount:", "oz"
-    amount_font = fitted_font([f"{amount_label}      {amount_unit}"], 46)
+    amount_label = "Amount:"
+    amount_value = f"{oz:.1f} oz" if oz is not None else "oz"
+    amount_font = fitted_font([f"{amount_label}   {amount_value}"], 46)
     small_font = fitted_font(
         [f"{lbl}{'  ' * 4}{val}" for lbl, val in exp_pairs], 40)
 
@@ -187,18 +188,20 @@ def build_label_image(now):
     icon_cy = MARGIN_PX + band_h / 2
     (draw_sun if is_day else draw_moon)(draw, icon_cx, icon_cy, ICON_R)
 
-    # Amount write-in field: "Amount:" ____________ "oz"
+    # Amount field: "Amount:" + the filled value (from the M5Dial knob), or a
+    # blank write-in line when no oz was supplied (e.g. the S200D button).
     y = MARGIN_PX + band_h + GAP_AFTER_HEADER
     al = draw.textbbox((0, 0), amount_label, font=amount_font)
-    au = draw.textbbox((0, 0), amount_unit, font=amount_font)
+    av = draw.textbbox((0, 0), amount_value, font=amount_font)
     draw.text((MARGIN_PX - al[0], y - al[1]), amount_label,
               fill="black", font=amount_font)
-    unit_x = LABEL_WIDTH_PX - MARGIN_PX - (au[2] - au[0]) - au[0]
-    draw.text((unit_x, y - au[1]), amount_unit, fill="black", font=amount_font)
-    line_x1 = MARGIN_PX + (al[2] - al[0]) + 15
-    line_x2 = LABEL_WIDTH_PX - MARGIN_PX - (au[2] - au[0]) - 15
-    draw.line([(line_x1, y + amount_h), (line_x2, y + amount_h)],
-              fill="black", width=3)
+    val_x = LABEL_WIDTH_PX - MARGIN_PX - (av[2] - av[0]) - av[0]
+    draw.text((val_x, y - av[1]), amount_value, fill="black", font=amount_font)
+    if oz is None:
+        line_x1 = MARGIN_PX + (al[2] - al[0]) + 15
+        line_x2 = val_x - 15
+        draw.line([(line_x1, y + amount_h), (line_x2, y + amount_h)],
+                  fill="black", width=3)
     y += amount_h + AMOUNT_GAP
 
     # Expiration rows: label flush left, value flush right.
@@ -297,11 +300,25 @@ def health():
     return jsonify(status="ok")
 
 
+def _parse_oz():
+    """Read an optional `oz` amount from the query string, form, or JSON body."""
+    raw = request.values.get("oz")
+    if raw is None and request.is_json:
+        raw = (request.get_json(silent=True) or {}).get("oz")
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 @app.post("/print")
 def do_print():
     cfg = load_config()
     now = datetime.now()
-    img, header_text = build_label_image(now)
+    oz = _parse_oz()
+    img, header_text = build_label_image(now, oz)
     try:
         ip = resolve_printer_ip(cfg["printer_ip"])
     except RuntimeError as e:
@@ -320,8 +337,9 @@ def do_print():
     except Exception as e:
         return jsonify(status="error", error=str(e)), 502
 
-    print(f"Printed '{header_text}' to {ip}", flush=True)
-    return jsonify(status="ok", printed=header_text, printer_ip=ip)
+    print(f"Printed '{header_text}'{f' ({oz:.1f} oz)' if oz is not None else ''} "
+          f"to {ip}", flush=True)
+    return jsonify(status="ok", printed=header_text, oz=oz, printer_ip=ip)
 
 
 if __name__ == "__main__":

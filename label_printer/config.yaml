@@ -3,7 +3,7 @@
 # Settings > Add-ons > Add-on Store > (three dots) > Check for updates / reload,
 # and "Breast Milk Label Printer" will appear under "Local add-ons".
 name: "Breast Milk Label Printer"
-version: "1.0.0"
+version: "1.1.0"
 slug: "label_printer"
 description: "Prints a date/time + expiration label to a networked Brother QL-820NWB on demand."
 url: "https://github.com/jmartz/ha-label-printer-addon/tree/main/label_printer"
