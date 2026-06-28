@@ -95,8 +95,12 @@ def local_subnet():
         s.close()
 
 
-def scan_for_printer():
-    base = local_subnet()
+def scan_for_printer(seed_ip=None):
+    # Scan the /24 of the printer's last-known IP: when DHCP moves the printer
+    # it stays on the same subnet, and this avoids local_subnet() picking the
+    # container's Docker bridge subnet (the default route goes via Supervisor,
+    # not the LAN, even with host networking).
+    base = seed_ip.rsplit(".", 1)[0] if seed_ip else local_subnet()
     hosts = [f"{base}.{i}" for i in range(1, 255)]
     with ThreadPoolExecutor(max_workers=64) as ex:
         open_hosts = [h for h, ok in zip(hosts, ex.map(port_open, hosts)) if ok]
@@ -126,11 +130,12 @@ def write_cached_ip(ip):
 
 def resolve_printer_ip(configured_ip):
     # Prefer the last IP we discovered, then the configured one.
-    for candidate in (read_cached_ip(), configured_ip):
+    cached = read_cached_ip()
+    for candidate in (cached, configured_ip):
         if candidate and port_open(candidate):
             return candidate
     print("Printer not reachable at known IP -- scanning the network...", flush=True)
-    found = scan_for_printer()
+    found = scan_for_printer(configured_ip or cached)
     if not found:
         raise RuntimeError("Could not find the QL printer on the network.")
     print(f"Found printer at {found}.", flush=True)
