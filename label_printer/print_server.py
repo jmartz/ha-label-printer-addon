@@ -1,45 +1,37 @@
 #!/usr/bin/env python3
 """
 HTTP print service for a networked Brother QL-820NWB, packaged as a Home
-Assistant add-on. POST /print prints a breast-milk label stamped with the
-current date/time, expiration deadlines, an Amount write-in field, and a
-day/night ("sleepy time" milk) icon.
+Assistant add-on. POST /print prints a universal fridge label (breast milk +
+leftovers) stamped with the current date/time, a day-of-week strip, the
+computed Use-By deadlines, a thaw write-in, and a day/night ("sleepy time"
+milk) icon. An optional `oz` value (from the M5Dial knob) prints beside the
+icon.
 
-This is the same label as the standalone print_date_label.py, wrapped in a
-tiny Flask server so Home Assistant can trigger it (e.g. from a Tapo S200D
-button) without any PC involved -- the add-on talks straight to the printer.
+The label itself is rendered in label_render.py (kept free of brother_ql so it
+can be previewed off the printer). This module is just the printer plumbing:
+find the QL on the LAN and send the raster.
 """
 
-import calendar
 import json
-import math
 import os
 import re
 import socket
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from flask import Flask, jsonify, request
-from PIL import Image, ImageDraw, ImageFont
 from brother_ql.conversion import convert
 from brother_ql.backends.helpers import send
 from brother_ql.raster import BrotherQLRaster
 
+from label_render import build_label_image
+
 MODEL = "QL-820NWB"
 PRINT_PORT = 9100
-LABEL_WIDTH_PX = 696          # printable width for 62mm media at 300 dpi
-MARGIN_PX = 24
-max_text_w = LABEL_WIDTH_PX - 2 * MARGIN_PX
 
 # Where we remember a freshly-discovered IP between runs (HA add-on data dir).
 IP_CACHE = "/data/last_ip.txt"
-
-FONT_CANDIDATES = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "DejaVuSans-Bold.ttf",
-    "arialbd.ttf",
-]
 
 
 # ----------------------------------------------------------------------
@@ -57,164 +49,6 @@ def load_config():
     cfg["printer_ip"] = os.environ.get("PRINTER_IP", cfg["printer_ip"])
     cfg["label"] = os.environ.get("LABEL", cfg["label"])
     return cfg
-
-
-# ----------------------------------------------------------------------
-# Fonts / text helpers
-# ----------------------------------------------------------------------
-
-def load_font(size):
-    for path in FONT_CANDIDATES:
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
-
-_measure = ImageDraw.Draw(Image.new("RGB", (10, 10)))
-
-
-def fitted_font(texts, start_size, min_size=10, max_w=None):
-    if max_w is None:
-        max_w = max_text_w
-    size = start_size
-    while size > min_size:
-        f = load_font(size)
-        if all(_measure.textlength(t, font=f) <= max_w for t in texts):
-            return f
-        size -= 2
-    return load_font(min_size)
-
-
-def line_height(text, font):
-    b = _measure.textbbox((0, 0), text, font=font)
-    return b[3] - b[1], b[1]
-
-
-def fmt_time(dt):
-    h = dt.hour % 12 or 12
-    return f"{h}:{dt.minute:02d} {'am' if dt.hour < 12 else 'pm'}"
-
-
-def add_months(dt, months):
-    m = dt.month - 1 + months
-    y = dt.year + m // 12
-    m = m % 12 + 1
-    last_day = calendar.monthrange(y, m)[1]
-    return dt.replace(year=y, month=m, day=min(dt.day, last_day))
-
-
-# ----------------------------------------------------------------------
-# Day/night icon
-# ----------------------------------------------------------------------
-
-DAY_START, DAY_END = 7, 19        # 7am-7pm = day (sun), otherwise night (moon)
-
-
-def draw_sun(d, cx, cy, r):
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill="black")
-    ray_in, ray_out = r + 7, r + 7 + int(r * 0.55)
-    w = max(3, int(r * 0.20))
-    for k in range(8):
-        a = math.pi / 4 * k
-        d.line([(cx + math.cos(a) * ray_in, cy + math.sin(a) * ray_in),
-                (cx + math.cos(a) * ray_out, cy + math.sin(a) * ray_out)],
-               fill="black", width=w)
-
-
-def draw_moon(d, cx, cy, r):
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill="black")
-    off = int(r * 0.55)
-    d.ellipse([cx - r + off, cy - r - int(r * 0.18),
-               cx + r + off, cy + r - int(r * 0.18)], fill="white")
-
-
-# ----------------------------------------------------------------------
-# Build the label image
-# ----------------------------------------------------------------------
-
-def build_label_image(now, oz=None):
-    header_text = f"{now:%a} | {now:%b} {now.day} | {fmt_time(now)}"
-
-    room = now + timedelta(hours=4)        # room temp 77F/25C: 4 hours
-    fridge = now + timedelta(days=4)       # fridge 40F/4C: 4 days
-    freezer = add_months(now, 6)           # freezer 0F/-18C: 6 months (best)
-    exp_pairs = [
-        ("Room temp (4 hrs):", f"{room:%a} {fmt_time(room)}"),
-        ("Fridge (4 days):", f"{fridge:%a %b} {fridge.day}"),
-        ("Freezer (6 mo):", f"{freezer:%b} {freezer.day}, {freezer.year}"),
-    ]
-
-    is_day = DAY_START <= now.hour < DAY_END
-
-    ICON_R = 26
-    ICON_RAY = int(ICON_R * 0.55)
-    ICON_W = 2 * (ICON_R + 7 + ICON_RAY)
-    ICON_GAP = 22
-
-    header_font = fitted_font([header_text], 72,
-                              max_w=max_text_w - ICON_W - ICON_GAP)
-    amount_label = "Amount:"
-    amount_value = f"{oz:.1f} oz" if oz is not None else "oz"
-    amount_font = fitted_font([f"{amount_label}   {amount_value}"], 46)
-    small_font = fitted_font(
-        [f"{lbl}{'  ' * 4}{val}" for lbl, val in exp_pairs], 40)
-
-    GAP_AFTER_HEADER = 18
-    AMOUNT_GAP = 24
-    LINE_GAP = 10
-
-    hdr_h, _ = line_height(header_text, header_font)
-    amount_h, _ = line_height(amount_label, amount_font)
-    row_h = max(line_height(lbl + val, small_font)[0] for lbl, val in exp_pairs)
-    band_h = max(hdr_h, ICON_W)
-
-    total_h = (MARGIN_PX + band_h + GAP_AFTER_HEADER + amount_h + AMOUNT_GAP
-               + len(exp_pairs) * row_h + (len(exp_pairs) - 1) * LINE_GAP
-               + MARGIN_PX)
-
-    img = Image.new("RGB", (LABEL_WIDTH_PX, total_h), "white")
-    draw = ImageDraw.Draw(img)
-
-    # Header band: centered header on the left, day/night icon on the right.
-    region_w = LABEL_WIDTH_PX - 2 * MARGIN_PX - ICON_W - ICON_GAP
-    hb = draw.textbbox((0, 0), header_text, font=header_font)
-    hx = MARGIN_PX + (region_w - (hb[2] - hb[0])) / 2 - hb[0]
-    draw.text((hx, MARGIN_PX + (band_h - hdr_h) / 2 - hb[1]),
-              header_text, fill="black", font=header_font)
-
-    icon_cx = LABEL_WIDTH_PX - MARGIN_PX - ICON_W / 2
-    icon_cy = MARGIN_PX + band_h / 2
-    (draw_sun if is_day else draw_moon)(draw, icon_cx, icon_cy, ICON_R)
-
-    # Amount field: "Amount:" + the filled value (from the M5Dial knob), or a
-    # blank write-in line when no oz was supplied (e.g. the S200D button).
-    y = MARGIN_PX + band_h + GAP_AFTER_HEADER
-    al = draw.textbbox((0, 0), amount_label, font=amount_font)
-    av = draw.textbbox((0, 0), amount_value, font=amount_font)
-    draw.text((MARGIN_PX - al[0], y - al[1]), amount_label,
-              fill="black", font=amount_font)
-    val_x = LABEL_WIDTH_PX - MARGIN_PX - (av[2] - av[0]) - av[0]
-    draw.text((val_x, y - av[1]), amount_value, fill="black", font=amount_font)
-    if oz is None:
-        line_x1 = MARGIN_PX + (al[2] - al[0]) + 15
-        line_x2 = val_x - 15
-        draw.line([(line_x1, y + amount_h), (line_x2, y + amount_h)],
-                  fill="black", width=3)
-    y += amount_h + AMOUNT_GAP
-
-    # Expiration rows: label flush left, value flush right.
-    for lbl, val in exp_pairs:
-        lb = draw.textbbox((0, 0), lbl, font=small_font)
-        vb = draw.textbbox((0, 0), val, font=small_font)
-        draw.text((MARGIN_PX - lb[0], y - lb[1]), lbl,
-                  fill="black", font=small_font)
-        val_x = LABEL_WIDTH_PX - MARGIN_PX - (vb[2] - vb[0]) - vb[0]
-        draw.text((val_x, y - vb[1]), val, fill="black", font=small_font)
-        y += row_h + LINE_GAP
-
-    return img, header_text
 
 
 # ----------------------------------------------------------------------
@@ -301,7 +135,11 @@ def health():
 
 
 def _parse_oz():
-    """Read an optional `oz` amount from the query string, form, or JSON body."""
+    """Read an optional `oz` amount from the query string, form, or JSON body.
+
+    Absent/blank means the M5Dial knob was never turned (screen shows '-.- oz')
+    or the trigger was a plain button press -- the label omits the amount.
+    """
     raw = request.values.get("oz")
     if raw is None and request.is_json:
         raw = (request.get_json(silent=True) or {}).get("oz")

@@ -10,7 +10,7 @@ RUN apt-get update \
 RUN pip install --no-cache-dir flask brother_ql Pillow
 
 WORKDIR /app
-COPY print_server.py /app/
+COPY print_server.py label_render.py /app/
 
 EXPOSE 8099
 CMD ["python", "print_server.py"]
