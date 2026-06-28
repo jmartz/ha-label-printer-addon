@@ -63,13 +63,27 @@ def port_open(ip, port=PRINT_PORT, timeout=0.7):
         return False
 
 
-def is_ql_printer(ip):
+def _fetch(url, n=12000):
     try:
-        with urllib.request.urlopen(f"http://{ip}/", timeout=3) as resp:
-            html = resp.read(8000).decode("latin-1", "ignore")
-        return bool(re.search(r"QL-\w+", html, re.IGNORECASE))
+        with urllib.request.urlopen(url, timeout=4) as resp:
+            return resp.read(n).decode("latin-1", "ignore")
     except Exception:
-        return False
+        return ""
+
+
+def is_ql_printer(ip):
+    """True only if the device identifies as a Brother QL label printer.
+
+    Several Brother devices (e.g. an MFC inkjet all-in-one) also run the same
+    'debut' web server with TCP 9100 open, so a bare port check isn't enough --
+    we must positively match the QL model or we risk printing label raster to
+    the wrong printer. The root path 301-redirects to a status page (urllib
+    follows it); we also probe the status pages directly as a fallback.
+    """
+    for path in ("/", "/general/status.html", "/general/information.html"):
+        if re.search(r"QL-\d", _fetch(f"http://{ip}{path}"), re.IGNORECASE):
+            return True
+    return False
 
 
 def local_subnet():
@@ -89,7 +103,9 @@ def scan_for_printer():
     for h in open_hosts:
         if is_ql_printer(h):
             return h
-    return open_hosts[0] if open_hosts else None
+    # Don't guess: never fall back to an arbitrary :9100 host -- it could be a
+    # different Brother printer (an inkjet), and we'd print labels to it.
+    return None
 
 
 def read_cached_ip():

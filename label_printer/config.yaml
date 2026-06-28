@@ -3,7 +3,7 @@
 # Settings > Add-ons > Add-on Store > (three dots) > Check for updates / reload,
 # and "Breast Milk Label Printer" will appear under "Local add-ons".
 name: "Breast Milk Label Printer"
-version: "2.0.0"
+version: "2.1.0"
 slug: "label_printer"
 description: "Prints a universal fridge label (breast milk + leftovers): day strip, in/expressed time, Use-By matrix, and thaw write-in, to a networked Brother QL-820NWB on demand."
 url: "https://github.com/jmartz/ha-label-printer-addon/tree/main/label_printer"
@@ -11,12 +11,16 @@ arch:
   - aarch64   # Raspberry Pi / HA Green / HA Yellow
   - amd64     # Intel NUC / generic x86 mini-PC
 init: false
+# Run on the host's network so the printer auto-discovery scan sees the real
+# LAN (192.168.x) instead of Docker's internal bridge subnet, and so it can
+# positively ID the QL-820NWB rather than printing to another Brother device.
+host_network: true
 ports:
   8099/tcp: 8099
 ports_description:
   8099/tcp: "HTTP print endpoint (POST /print)"
 options:
-  printer_ip: "192.168.10.83"
+  printer_ip: "192.168.10.120"
   label: "62"
 schema:
   printer_ip: str
