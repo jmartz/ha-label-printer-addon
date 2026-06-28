@@ -104,8 +104,11 @@ def scan_for_printer(seed_ip=None):
     hosts = [f"{base}.{i}" for i in range(1, 255)]
     with ThreadPoolExecutor(max_workers=64) as ex:
         open_hosts = [h for h, ok in zip(hosts, ex.map(port_open, hosts)) if ok]
+    print(f"Scan of {base}.0/24: :9100 open on {open_hosts or 'no hosts'}", flush=True)
     for h in open_hosts:
-        if is_ql_printer(h):
+        ok = is_ql_printer(h)
+        print(f"  {h}: {'QL printer' if ok else 'not a QL'}", flush=True)
+        if ok:
             return h
     # Don't guess: never fall back to an arbitrary :9100 host -- it could be a
     # different Brother printer (an inkjet), and we'd print labels to it.

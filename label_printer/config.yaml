@@ -3,7 +3,7 @@
 # Settings > Add-ons > Add-on Store > (three dots) > Check for updates / reload,
 # and "Breast Milk Label Printer" will appear under "Local add-ons".
 name: "Breast Milk Label Printer"
-version: "2.2.0"
+version: "2.2.1"
 slug: "label_printer"
 description: "Prints a universal fridge label (breast milk + leftovers): day strip, in/expressed time, Use-By matrix, and thaw write-in, to a networked Brother QL-820NWB on demand."
 url: "https://github.com/jmartz/ha-label-printer-addon/tree/main/label_printer"
