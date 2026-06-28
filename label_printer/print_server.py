@@ -103,7 +103,11 @@ def scan_for_printer(seed_ip=None):
     base = seed_ip.rsplit(".", 1)[0] if seed_ip else local_subnet()
     hosts = [f"{base}.{i}" for i in range(1, 255)]
     with ThreadPoolExecutor(max_workers=64) as ex:
-        open_hosts = [h for h, ok in zip(hosts, ex.map(port_open, hosts)) if ok]
+        # 1.5s tolerates a power-saving printer waking up without making the
+        # full /24 sweep too slow.
+        open_hosts = [h for h, ok in
+                      zip(hosts, ex.map(lambda h: port_open(h, timeout=1.5), hosts))
+                      if ok]
     print(f"Scan of {base}.0/24: :9100 open on {open_hosts or 'no hosts'}", flush=True)
     for h in open_hosts:
         ok = is_ql_printer(h)
@@ -132,10 +136,13 @@ def write_cached_ip(ip):
 
 
 def resolve_printer_ip(configured_ip):
-    # Prefer the last IP we discovered, then the configured one.
+    # Prefer the last IP we discovered, then the configured one. Use a generous
+    # timeout: a QL on WiFi power-save can take a couple seconds to answer the
+    # first packet (the actual print wakes it fine, but a short probe would give
+    # up and wrongly trigger a network rescan).
     cached = read_cached_ip()
     for candidate in (cached, configured_ip):
-        if candidate and port_open(candidate):
+        if candidate and port_open(candidate, timeout=3.0):
             return candidate
     print("Printer not reachable at known IP -- scanning the network...", flush=True)
     found = scan_for_printer(configured_ip or cached)
