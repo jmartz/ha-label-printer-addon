@@ -3,7 +3,7 @@
 # Settings > Add-ons > Add-on Store > (three dots) > Check for updates / reload,
 # and "Breast Milk Label Printer" will appear under "Local add-ons".
 name: "Breast Milk Label Printer"
-version: "3.0.0"
+version: "3.1.0"
 slug: "label_printer"
 description: "Prints fridge labels (breast milk + leftovers) on demand AND a web-based custom-label designer (any media size, fonts, styles, special characters, QR/barcodes) to a networked Brother QL-820NWB."
 url: "https://github.com/jmartz/ha-label-printer-addon/tree/main/label_printer"
@@ -11,11 +11,21 @@ arch:
   - aarch64   # Raspberry Pi / HA Green / HA Yellow
   - amd64     # Intel NUC / generic x86 mini-PC
 init: false
-# Run on the host's network for direct LAN access to the printer. (Note: the
-# container's default route still goes via the Supervisor bridge, so the
-# discovery scan derives its subnet from the configured printer IP, not the
-# default route -- see scan_for_printer in print_server.py.)
-host_network: true
+# Ingress lets Home Assistant proxy the designer UI through its OWN web server
+# (same origin + scheme as HA), so the embedded page works over https and in the
+# mobile app -- no more "can't load http: iframe" mixed-content error. With
+# ingress + panel_*, the add-on also appears directly in the HA sidebar.
+#
+# We do NOT use host_network: it's incompatible with ingress, and it isn't
+# needed -- outbound connections to the printer and the discovery scan reach the
+# LAN via NAT, and scan_for_printer scans the configured printer IP's /24 (not
+# the default route), so it never depends on the container's own subnet.
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:label
+panel_title: "Label Designer"
+# Keep the direct port open too: the M5Dial and the HA rest_command POST
+# straight to 192.168.10.35:8099/print, bypassing ingress.
 ports:
   8099/tcp: 8099
 ports_description:

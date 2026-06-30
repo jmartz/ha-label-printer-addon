@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Label Designer</title>
-<link rel="stylesheet" href="/fonts.css">
+<!-- relative URLs throughout so the app works under HA's ingress sub-path -->
+<link rel="stylesheet" href="fonts.css">
 <style>
   :root { --bg:#1f2329; --panel:#2b3038; --ink:#e8eaed; --mut:#9aa0a6;
           --accent:#4f9cff; --line:#3a4049; --danger:#ff5c5c; }
@@ -131,8 +132,8 @@ function toast(msg, bad){ const t=$('#toast'); t.textContent=msg;
 // ---- init ------------------------------------------------------------
 async function init(){
   [MEDIA, FONTS] = await Promise.all([
-    fetch('/api/media').then(r=>r.json()),
-    fetch('/api/fonts').then(r=>r.json())]);
+    fetch('api/media').then(r=>r.json()),
+    fetch('api/fonts').then(r=>r.json())]);
   const sel = $('#media');
   const groups = {continuous:'Continuous (any length)', 'die-cut':'Die-cut', round:'Round'};
   for (const kind of Object.keys(groups)){
@@ -388,7 +389,7 @@ function buildSpec(){
 
 async function doPreview(){
   try{
-    const r = await fetch('/preview',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r = await fetch('preview',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(buildSpec())});
     if(!r.ok){ toast('Preview error: '+(await r.json()).error, true); return; }
     const b = await r.blob(); $('#prevImg').src = URL.createObjectURL(b);
@@ -400,7 +401,7 @@ async function doPrint(){
   if(!state.els.length){ toast('Nothing to print', true); return; }
   $('#printBtn').disabled=true; $('#printBtn').textContent='Printing…';
   try{
-    const r = await fetch('/print_custom',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r = await fetch('print_custom',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(buildSpec())});
     const j = await r.json();
     if(j.status==='ok') toast(`Printed ${j.copies}× to ${j.printer_ip}`);
@@ -411,25 +412,25 @@ async function doPrint(){
 
 // ---- templates -------------------------------------------------------
 async function loadTemplates(){
-  const names = await fetch('/api/templates').then(r=>r.json());
+  const names = await fetch('api/templates').then(r=>r.json());
   const s=$('#tplSelect'); s.innerHTML='<option value="">Templates…</option>'+
     names.map(n=>`<option>${n}</option>`).join('');
 }
 async function saveTemplate(){
   const name = prompt('Save design as:'); if(!name) return;
-  await fetch('/api/templates',{method:'POST',headers:{'Content-Type':'application/json'},
+  await fetch('api/templates',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({name, spec:buildSpec()})});
   await loadTemplates(); $('#tplSelect').value=name; toast('Saved "'+name+'"');
 }
 async function loadTemplate(){
   const name=$('#tplSelect').value; if(!name) return;
-  const spec = await fetch('/api/templates/'+encodeURIComponent(name)).then(r=>r.json());
+  const spec = await fetch('api/templates/'+encodeURIComponent(name)).then(r=>r.json());
   applySpec(spec); toast('Loaded "'+name+'"');
 }
 async function deleteTemplate(){
   const name=$('#tplSelect').value; if(!name) return;
   if(!confirm('Delete template "'+name+'"?')) return;
-  await fetch('/api/templates/'+encodeURIComponent(name),{method:'DELETE'});
+  await fetch('api/templates/'+encodeURIComponent(name),{method:'DELETE'});
   await loadTemplates(); toast('Deleted');
 }
 function applySpec(spec){

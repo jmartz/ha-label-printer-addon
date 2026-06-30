@@ -257,9 +257,11 @@ def fonts_css():
                                       ("bolditalic", "bold", "italic")):
             bold, ital = "bold" in style, "italic" in style
             if custom_render.font_file(family, bold, ital):
+                # Relative URL (no leading slash) so it resolves under HA's
+                # ingress sub-path as well as on the direct :8099 port.
                 rules.append(
                     f"@font-face{{font-family:'{family}';"
-                    f"src:url('/fonts/{family}/{style}');"
+                    f"src:url('fonts/{family}/{style}');"
                     f"font-weight:{weight};font-style:{fstyle};font-display:block;}}")
     return Response("\n".join(rules), mimetype="text/css")
 
