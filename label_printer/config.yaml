@@ -3,9 +3,9 @@
 # Settings > Add-ons > Add-on Store > (three dots) > Check for updates / reload,
 # and "Breast Milk Label Printer" will appear under "Local add-ons".
 name: "Breast Milk Label Printer"
-version: "2.2.2"
+version: "3.0.0"
 slug: "label_printer"
-description: "Prints a universal fridge label (breast milk + leftovers): day strip, in/expressed time, Use-By matrix, and thaw write-in, to a networked Brother QL-820NWB on demand."
+description: "Prints fridge labels (breast milk + leftovers) on demand AND a web-based custom-label designer (any media size, fonts, styles, special characters, QR/barcodes) to a networked Brother QL-820NWB."
 url: "https://github.com/jmartz/ha-label-printer-addon/tree/main/label_printer"
 arch:
   - aarch64   # Raspberry Pi / HA Green / HA Yellow

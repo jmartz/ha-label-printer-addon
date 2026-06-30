@@ -12,6 +12,7 @@ can be previewed off the printer). This module is just the printer plumbing:
 find the QL on the LAN and send the raster.
 """
 
+import io
 import json
 import os
 import re
@@ -20,18 +21,23 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request, send_from_directory
 from brother_ql.conversion import convert
 from brother_ql.backends.helpers import send
 from brother_ql.raster import BrotherQLRaster
 
 from label_render import build_label_image
+import custom_render
 
 MODEL = "QL-820NWB"
 PRINT_PORT = 9100
 
 # Where we remember a freshly-discovered IP between runs (HA add-on data dir).
 IP_CACHE = "/data/last_ip.txt"
+
+# Static designer UI + saved custom-label templates (HA add-on data dir).
+WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+TEMPLATES_FILE = "/data/templates.json"
 
 
 # ----------------------------------------------------------------------
@@ -182,6 +188,26 @@ def _parse_oz():
         return None
 
 
+def print_image(img, label_code):
+    """Send a PIL image to the QL on the given brother_ql media code.
+
+    Returns the printer IP on success; raises RuntimeError if the printer can't
+    be found and propagates send() errors to the caller.
+    """
+    cfg = load_config()
+    ip = resolve_printer_ip(cfg["printer_ip"])
+    qlr = BrotherQLRaster(MODEL)
+    qlr.exception_on_warning = True
+    instructions = convert(
+        qlr=qlr, images=[img], label=label_code, rotate="0",
+        threshold=70.0, dither=False, compress=False, red=False,
+        dpi_600=False, hq=True, cut=True,
+    )
+    send(instructions=instructions, printer_identifier=f"tcp://{ip}",
+         backend_identifier="network", blocking=True)
+    return ip
+
+
 @app.post("/print")
 def do_print():
     cfg = load_config()
@@ -189,26 +215,154 @@ def do_print():
     oz = _parse_oz()
     img, header_text = build_label_image(now, oz)
     try:
-        ip = resolve_printer_ip(cfg["printer_ip"])
+        ip = print_image(img, cfg["label"])
     except RuntimeError as e:
         return jsonify(status="error", error=str(e)), 503
-
-    qlr = BrotherQLRaster(MODEL)
-    qlr.exception_on_warning = True
-    instructions = convert(
-        qlr=qlr, images=[img], label=cfg["label"], rotate="0",
-        threshold=70.0, dither=False, compress=False, red=False,
-        dpi_600=False, hq=True, cut=True,
-    )
-    try:
-        send(instructions=instructions, printer_identifier=f"tcp://{ip}",
-             backend_identifier="network", blocking=True)
     except Exception as e:
         return jsonify(status="error", error=str(e)), 502
 
     print(f"Printed '{header_text}'{f' ({oz:.1f} oz)' if oz is not None else ''} "
           f"to {ip}", flush=True)
     return jsonify(status="ok", printed=header_text, oz=oz, printer_ip=ip)
+
+
+# ----------------------------------------------------------------------
+# Custom-label designer: static UI, fonts, media, preview, print, templates
+# ----------------------------------------------------------------------
+
+@app.get("/")
+@app.get("/designer")
+def designer():
+    return send_from_directory(WEB_DIR, "designer.html")
+
+
+@app.get("/api/media")
+def api_media():
+    return jsonify(custom_render.media_table())
+
+
+@app.get("/api/fonts")
+def api_fonts():
+    return jsonify(list(custom_render.FONTS.keys()))
+
+
+@app.get("/fonts.css")
+def fonts_css():
+    """@font-face rules so the browser renders text with the SAME TTFs as PIL."""
+    rules = []
+    for family in custom_render.FONTS:
+        for style, weight, fstyle in (("regular", "normal", "normal"),
+                                      ("bold", "bold", "normal"),
+                                      ("italic", "normal", "italic"),
+                                      ("bolditalic", "bold", "italic")):
+            bold, ital = "bold" in style, "italic" in style
+            if custom_render.font_file(family, bold, ital):
+                rules.append(
+                    f"@font-face{{font-family:'{family}';"
+                    f"src:url('/fonts/{family}/{style}');"
+                    f"font-weight:{weight};font-style:{fstyle};font-display:block;}}")
+    return Response("\n".join(rules), mimetype="text/css")
+
+
+@app.get("/fonts/<family>/<style>")
+def font_file_route(family, style):
+    bold, ital = "bold" in style, "italic" in style
+    path = custom_render.font_file(family, bold, ital)
+    if not path or not os.path.exists(path):
+        return Response("not found", status=404)
+    with open(path, "rb") as f:
+        return Response(f.read(), mimetype="font/ttf")
+
+
+def _spec_from_request():
+    spec = request.get_json(silent=True)
+    if not isinstance(spec, dict):
+        raise ValueError("expected a JSON design spec object")
+    return spec
+
+
+@app.post("/preview")
+def preview():
+    try:
+        img = custom_render.render_spec(_spec_from_request())
+    except Exception as e:
+        return jsonify(status="error", error=str(e)), 400
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return Response(buf.getvalue(), mimetype="image/png")
+
+
+@app.post("/print_custom")
+def print_custom():
+    try:
+        spec = _spec_from_request()
+        img = custom_render.render_spec(spec)
+    except Exception as e:
+        return jsonify(status="error", error=str(e)), 400
+    try:
+        ip = print_image(img, spec.get("media", "62"))
+    except RuntimeError as e:
+        return jsonify(status="error", error=str(e)), 503
+    except Exception as e:
+        return jsonify(status="error", error=str(e)), 502
+    copies = max(1, int(spec.get("copies", 1)))
+    for _ in range(copies - 1):
+        try:
+            print_image(img, spec.get("media", "62"))
+        except Exception as e:
+            return jsonify(status="error", error=str(e)), 502
+    print(f"Printed custom label ({img.width}x{img.height}, "
+          f"media {spec.get('media', '62')}, {copies}x) to {ip}", flush=True)
+    return jsonify(status="ok", printer_ip=ip, copies=copies,
+                   size=[img.width, img.height])
+
+
+# --- saved design templates (named, reprintable) -----------------------
+
+def _load_templates():
+    try:
+        with open(TEMPLATES_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_templates(data):
+    with open(TEMPLATES_FILE, "w") as f:
+        json.dump(data, f)
+
+
+@app.get("/api/templates")
+def list_templates():
+    return jsonify(sorted(_load_templates().keys()))
+
+
+@app.get("/api/templates/<name>")
+def get_template(name):
+    t = _load_templates().get(name)
+    return jsonify(t) if t is not None else (jsonify(error="not found"), 404)
+
+
+@app.post("/api/templates")
+def save_template():
+    body = request.get_json(silent=True) or {}
+    name = str(body.get("name", "")).strip()
+    spec = body.get("spec")
+    if not name or not isinstance(spec, dict):
+        return jsonify(error="need name + spec"), 400
+    data = _load_templates()
+    data[name] = spec
+    _save_templates(data)
+    return jsonify(status="ok", name=name)
+
+
+@app.delete("/api/templates/<name>")
+def delete_template(name):
+    data = _load_templates()
+    if data.pop(name, None) is None:
+        return jsonify(error="not found"), 404
+    _save_templates(data)
+    return jsonify(status="ok")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Label Designer</title>
+<link rel="stylesheet" href="/fonts.css">
+<style>
+  :root { --bg:#1f2329; --panel:#2b3038; --ink:#e8eaed; --mut:#9aa0a6;
+          --accent:#4f9cff; --line:#3a4049; --danger:#ff5c5c; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+              font:14px/1.4 system-ui,Segoe UI,Roboto,sans-serif; }
+  #app { display:flex; flex-direction:column; height:100%; }
+  header { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+           padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line); }
+  header .grp { display:flex; gap:6px; align-items:center; }
+  header .sep { width:1px; height:26px; background:var(--line); margin:0 4px; }
+  label.fld { display:flex; gap:5px; align-items:center; color:var(--mut); font-size:12px; }
+  select,input,textarea,button { font:inherit; color:var(--ink); background:#171a1f;
+            border:1px solid var(--line); border-radius:6px; padding:5px 8px; }
+  input[type=number] { width:64px; }
+  input[type=checkbox] { width:auto; }
+  button { background:#363c45; cursor:pointer; }
+  button:hover { background:#434a55; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#06223f; font-weight:600; }
+  button.add { background:#2e3a30; }
+  main { flex:1; display:flex; min-height:0; }
+  #canvaswrap { flex:1; overflow:auto; padding:24px; display:flex; justify-content:center;
+                align-items:flex-start; background:#15171b; }
+  #stageOuter { position:relative; }
+  #stage { position:relative; background:#fff; transform-origin:top left;
+           box-shadow:0 0 0 1px #000, 0 8px 30px rgba(0,0,0,.5); }
+  #stage.round { border-radius:50%; }
+  .el { position:absolute; cursor:move; color:#000; }
+  .el.sel { outline:2px solid var(--accent); outline-offset:1px; }
+  .el.text { white-space:pre; }
+  .el.white { color:#fff; background:#888; }
+  .el .handle { position:absolute; right:-6px; bottom:-6px; width:12px; height:12px;
+                background:var(--accent); border:2px solid #fff; border-radius:3px;
+                cursor:nwse-resize; }
+  .el.placeholder { display:flex; align-items:center; justify-content:center; text-align:center;
+                    border:1px dashed #888; background:#f2f2f2; color:#333; font-size:12px;
+                    overflow:hidden; }
+  aside { width:300px; background:var(--panel); border-left:1px solid var(--line);
+          overflow:auto; padding:12px; }
+  aside h3 { margin:2px 0 10px; font-size:13px; color:var(--mut); text-transform:uppercase;
+             letter-spacing:.04em; }
+  .row { display:flex; gap:8px; align-items:center; margin-bottom:9px; }
+  .row label { width:74px; color:var(--mut); font-size:12px; }
+  .row > input, .row > select, .row > textarea { flex:1; }
+  .row.split > * { flex:1; }
+  textarea { width:100%; min-height:64px; resize:vertical; }
+  .syms { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:9px; }
+  .syms button { padding:2px 7px; min-width:28px; }
+  #preview { width:300px; background:var(--panel); border-left:1px solid var(--line);
+             padding:12px; overflow:auto; }
+  #preview img { width:100%; background:#fff; border:1px solid var(--line); border-radius:4px; }
+  .muted { color:var(--mut); font-size:12px; }
+  #toast { position:fixed; bottom:16px; left:50%; transform:translateX(-50%);
+           background:#000; color:#fff; padding:10px 16px; border-radius:8px; opacity:0;
+           transition:opacity .2s; pointer-events:none; max-width:70%; }
+  #toast.show { opacity:.95; }
+  .pill { font-size:11px; color:var(--mut); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="grp">
+      <strong>🏷️ Label Designer</strong>
+    </div>
+    <span class="sep"></span>
+    <label class="fld">Media
+      <select id="media"></select>
+    </label>
+    <label class="fld" id="lenWrap">Length
+      <select id="lenMode"><option value="auto">Auto-fit</option><option value="fixed">Fixed mm</option></select>
+      <input type="number" id="lenMm" value="90" min="10" max="1000" style="display:none">
+    </label>
+    <span class="pill" id="dims"></span>
+    <span class="sep"></span>
+    <label class="fld">Zoom
+      <input type="range" id="zoom" min="20" max="200" value="100" style="width:90px">
+    </label>
+    <span class="sep"></span>
+    <div class="grp">
+      <button class="add" data-add="text">+ Text</button>
+      <button class="add" data-add="qr">+ QR</button>
+      <button class="add" data-add="barcode">+ Barcode</button>
+      <button class="add" data-add="rect">+ Box</button>
+      <button class="add" data-add="line">+ Line</button>
+      <button class="add" data-add="image">+ Image</button>
+    </div>
+    <span class="sep"></span>
+    <div class="grp">
+      <label class="fld">Copies <input type="number" id="copies" value="1" min="1" max="50"></label>
+      <button id="previewBtn">Preview</button>
+      <button id="printBtn" class="primary">Print</button>
+    </div>
+    <span class="sep"></span>
+    <div class="grp">
+      <select id="tplSelect"><option value="">Templates…</option></select>
+      <button id="tplLoad">Load</button>
+      <button id="tplSave">Save</button>
+      <button id="tplDelete">Delete</button>
+    </div>
+  </header>
+  <main>
+    <div id="canvaswrap"><div id="stageOuter"><div id="stage"></div></div></div>
+    <aside id="props"><h3>Properties</h3><p class="muted">Add an element, or click one to edit it.</p></aside>
+    <div id="preview"><h3 class="muted">Exact preview</h3>
+      <p class="muted">Click <b>Preview</b> to render exactly as it will print.</p>
+      <img id="prevImg" style="display:none"></div>
+  </main>
+</div>
+<div id="toast"></div>
+<input type="file" id="imgFile" accept="image/*" style="display:none">
+
+<script>
+const $ = s => document.querySelector(s);
+let MEDIA = [], FONTS = [];
+const state = { media:'62', mediaInfo:null, lenMode:'auto', lenMm:90, zoom:1,
+                copies:1, els:[], sel:null, seq:1 };
+let pendingImg = null;
+
+function toast(msg, bad){ const t=$('#toast'); t.textContent=msg;
+  t.style.background = bad ? '#7a1f1f' : '#000'; t.classList.add('show');
+  clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove('show'),2600); }
+
+// ---- init ------------------------------------------------------------
+async function init(){
+  [MEDIA, FONTS] = await Promise.all([
+    fetch('/api/media').then(r=>r.json()),
+    fetch('/api/fonts').then(r=>r.json())]);
+  const sel = $('#media');
+  const groups = {continuous:'Continuous (any length)', 'die-cut':'Die-cut', round:'Round'};
+  for (const kind of Object.keys(groups)){
+    const og = document.createElement('optgroup'); og.label = groups[kind];
+    MEDIA.filter(m=>m.kind===kind).forEach(m=>{
+      const o=document.createElement('option'); o.value=m.code; o.textContent=m.name;
+      og.appendChild(o); });
+    if (og.children.length) sel.appendChild(og);
+  }
+  sel.value = state.media;
+  await loadTemplates();
+  setMedia(state.media);
+  bind();
+  seedExample();
+}
+
+function mediaInfo(code){ return MEDIA.find(m=>m.code===code); }
+
+function setMedia(code){
+  state.media = code; state.mediaInfo = mediaInfo(code);
+  const cont = state.mediaInfo.kind==='continuous';
+  $('#lenWrap').style.display = cont ? '' : 'none';
+  render();
+}
+
+const PX_PER_MM = 300/25.4;
+function stageSize(){
+  const W = state.mediaInfo.width_px;
+  let H;
+  if (state.mediaInfo.kind!=='continuous') H = state.mediaInfo.length_px;  // fixed die
+  else if (state.lenMode==='fixed') H = Math.round(state.lenMm * PX_PER_MM);
+  else H = autoLen();
+  return {W, H:Math.max(H,40)};
+}
+
+function autoLen(){
+  if (!state.els.length) return Math.round(40*(300/25.4));
+  let bottom = 0;
+  for (const el of state.els){
+    const dom = document.getElementById('el-'+el.id);
+    const h = dom ? dom.offsetHeight : (el.h||el.size||80);
+    bottom = Math.max(bottom, (el.y||0) + h);
+  }
+  return Math.round(bottom + 16);
+}
+
+// ---- element factory -------------------------------------------------
+function addEl(type){
+  const id = state.seq++;
+  const base = {id, type, x:24, y:24, color:'black', rotation:0};
+  const defs = {
+    text:{text:'Text', family:'Sans', size:44, bold:false, italic:false, underline:false, align:'left'},
+    qr:{data:'https://', size:160, ecc:'M'},
+    barcode:{data:'12345678', symbology:'code128', w:360, h:120, show_text:true},
+    rect:{w:300, h:90, line:4, fill:false},
+    line:{w:300, line:4, angle:0, x2:324, y2:24},
+    image:{w:200, h:200, data:'', dither:true, threshold:128},
+  };
+  const el = Object.assign(base, defs[type]);
+  if (type==='image'){ pickImage(el); }
+  state.els.push(el); state.sel=id; render(); renderProps();
+  return el;
+}
+
+function pickImage(el){
+  const inp = $('#imgFile');
+  inp.onchange = () => { const f=inp.files[0]; if(!f) return;
+    const fr=new FileReader(); fr.onload=()=>{ el.data=fr.result;
+      const im=new Image(); im.onload=()=>{ const r=im.height/im.width;
+        el.w=Math.min(state.mediaInfo.width_px-48, im.width); el.h=Math.round(el.w*r);
+        render(); renderProps(); }; im.src=fr.result; }; fr.readAsDataURL(f); inp.value=''; };
+  inp.click();
+}
+
+// ---- render stage ----------------------------------------------------
+function render(){
+  const {W,H} = stageSize();
+  const st = $('#stage');
+  st.style.width = W+'px'; st.style.height = H+'px';
+  st.style.transform = `scale(${state.zoom})`;
+  st.classList.toggle('round', state.mediaInfo.round);
+  $('#stageOuter').style.width = W*state.zoom+'px';
+  $('#stageOuter').style.height = H*state.zoom+'px';
+  $('#dims').textContent = `${W}×${H}px · ${(W/(300/25.4)).toFixed(0)}×${(H/(300/25.4)).toFixed(0)}mm`;
+  st.innerHTML='';
+  for (const el of state.els) st.appendChild(domFor(el));
+}
+
+function domFor(el){
+  const d = document.createElement('div');
+  d.className = 'el ' + el.type; d.id = 'el-'+el.id;
+  if (el.id===state.sel) d.classList.add('sel');
+  if (el.color==='white') d.classList.add('white');
+  d.style.left = (el.x||0)+'px'; d.style.top = (el.y||0)+'px';
+  if (el.rotation) d.style.transform = `rotate(${el.rotation}deg)`;
+  if (el.type==='text'){
+    d.textContent = el.text;
+    d.style.fontFamily = `'${el.family}'`;
+    d.style.fontSize = el.size+'px';
+    d.style.fontWeight = el.bold?'bold':'normal';
+    d.style.fontStyle = el.italic?'italic':'normal';
+    d.style.textDecoration = el.underline?'underline':'none';
+    d.style.textAlign = el.align;
+  } else if (el.type==='rect'){
+    d.style.width=el.w+'px'; d.style.height=el.h+'px';
+    if (el.fill) d.style.background = el.color==='white'?'#fff':'#000';
+    else d.style.border = `${el.line}px solid ${el.color==='white'?'#fff':'#000'}`;
+    d.classList.remove('white');
+  } else if (el.type==='line'){
+    d.className='el line'; d.style.height=el.line+'px'; d.style.width=el.w+'px';
+    d.style.background = el.color==='white'?'#fff':'#000';
+    d.style.transformOrigin='0 50%';
+    d.style.transform = `rotate(${el.angle||0}deg)`;
+    d.style.marginTop = (-el.line/2)+'px';
+    if (el.id===state.sel) d.classList.add('sel');
+  } else if (el.type==='image' && el.data){
+    const im=document.createElement('img'); im.src=el.data;
+    im.style.width=el.w+'px'; im.style.height=el.h+'px'; im.draggable=false;
+    if (el.color==='white') im.style.filter='invert(1)';
+    d.appendChild(im);
+  } else { // qr / barcode / empty image: placeholder
+    d.classList.add('placeholder');
+    d.style.width=(el.size||el.w||160)+'px'; d.style.height=(el.size||el.h||160)+'px';
+    d.textContent = el.type==='qr' ? ('QR\n'+ (el.data||'')) :
+                    el.type==='barcode' ? ('▌▌▌ '+el.symbology+'\n'+(el.data||'')) : 'image';
+    d.style.whiteSpace='pre-wrap';
+  }
+  // drag + resize handle
+  if (el.type!=='line') addResize(d, el);
+  d.addEventListener('pointerdown', e=>startDrag(e, el, d));
+  return d;
+}
+
+function addResize(d, el){
+  if (!('w' in el || 'size' in el)) return;
+  const h=document.createElement('div'); h.className='handle';
+  h.addEventListener('pointerdown', e=>{ e.stopPropagation();
+    const sx=e.clientX, sy=e.clientY, w0=el.w||el.size, h0=el.h||el.size;
+    const move=ev=>{ const dx=(ev.clientX-sx)/state.zoom, dy=(ev.clientY-sy)/state.zoom;
+      if (el.type==='qr'){ el.size=Math.max(40, Math.round(w0+dx)); }
+      else if (el.type==='text'){ el.size=Math.max(8, Math.round((el.size)+(dy)/2)); }
+      else { el.w=Math.max(16,Math.round(w0+dx)); el.h=Math.max(16,Math.round(h0+dy)); }
+      render(); };
+    const up=()=>{ window.removeEventListener('pointermove',move);
+      window.removeEventListener('pointerup',up); renderProps(); };
+    window.addEventListener('pointermove',move); window.addEventListener('pointerup',up); });
+  d.appendChild(h);
+}
+
+function startDrag(e, el, d){
+  if (e.target.classList.contains('handle')) return;
+  e.preventDefault();
+  state.sel = el.id; renderProps(); markSel();
+  const sx=e.clientX, sy=e.clientY, x0=el.x||0, y0=el.y||0;
+  const move=ev=>{ el.x=Math.round(x0+(ev.clientX-sx)/state.zoom);
+                   el.y=Math.round(y0+(ev.clientY-sy)/state.zoom);
+                   d.style.left=el.x+'px'; d.style.top=el.y+'px';
+                   if(el.type==='line'){ el.x2=el.x+el.w; el.y2=el.y; } };
+  const up=()=>{ window.removeEventListener('pointermove',move);
+    window.removeEventListener('pointerup',up); renderProps();
+    if (state.lenMode==='auto' && state.mediaInfo.kind==='continuous') render(); };
+  window.addEventListener('pointermove',move); window.addEventListener('pointerup',up);
+}
+
+function markSel(){ document.querySelectorAll('.el').forEach(n=>n.classList.remove('sel'));
+  const n=document.getElementById('el-'+state.sel); if(n) n.classList.add('sel'); }
+
+// ---- properties panel ------------------------------------------------
+const SYMS = ['•','–','—','·','★','☆','✓','✔','✗','→','←','↑','↓','°','±','×','÷','½','¼','¾',
+              '€','£','¢','™','®','©','№','§','¶','«','»','“','”','‘','’','♥','☀','☾','⚠','☎'];
+
+function field(label, inner){ return `<div class="row"><label>${label}</label>${inner}</div>`; }
+
+function renderProps(){
+  const el = state.els.find(e=>e.id===state.sel);
+  const p = $('#props');
+  if (!el){ p.innerHTML='<h3>Properties</h3><p class="muted">Add an element, or click one to edit it.</p>'; return; }
+  let h = `<h3>${el.type}</h3>`;
+  const num=(k,l,min,max)=>field(l, `<input type="number" data-k="${k}" value="${el[k]??0}" ${min!=null?`min="${min}"`:''} ${max!=null?`max="${max}"`:''}>`);
+  if (el.type==='text'){
+    h += `<textarea data-k="text">${(el.text||'').replace(/</g,'&lt;')}</textarea>`;
+    h += `<div class="syms">`+SYMS.map(s=>`<button data-sym="${s}">${s}</button>`).join('')+`</div>`;
+    h += field('Font', `<select data-k="family">`+FONTS.map(f=>`<option ${f===el.family?'selected':''}>${f}</option>`).join('')+`</select>`);
+    h += field('Size', `<input type="number" data-k="size" value="${el.size}" min="8" max="400">`);
+    h += `<div class="row split">
+            <label><input type="checkbox" data-k="bold" ${el.bold?'checked':''}> Bold</label>
+            <label><input type="checkbox" data-k="italic" ${el.italic?'checked':''}> Italic</label>
+            <label><input type="checkbox" data-k="underline" ${el.underline?'checked':''}> Underln</label></div>`;
+    h += field('Align', `<select data-k="align">`+['left','center','right'].map(a=>`<option ${a===el.align?'selected':''}>${a}</option>`).join('')+`</select>`);
+  } else if (el.type==='qr'){
+    h += field('Data', `<input data-k="data" value="${(el.data||'').replace(/"/g,'&quot;')}">`);
+    h += num('size','Size px',40,696);
+    h += field('Error', `<select data-k="ecc">`+['L','M','Q','H'].map(a=>`<option ${a===el.ecc?'selected':''}>${a}</option>`).join('')+`</select>`);
+  } else if (el.type==='barcode'){
+    h += field('Data', `<input data-k="data" value="${(el.data||'').replace(/"/g,'&quot;')}">`);
+    h += field('Type', `<select data-k="symbology">`+['code128','code39','ean13','ean8','upca','isbn13'].map(a=>`<option ${a===el.symbology?'selected':''}>${a}</option>`).join('')+`</select>`);
+    h += `<div class="row split">`+num('w','Width',40,696)+num('h','Height',20,600)+`</div>`;
+    h += `<div class="row"><label>Caption</label><input type="checkbox" data-k="show_text" ${el.show_text?'checked':''}></div>`;
+  } else if (el.type==='rect'){
+    h += `<div class="row split">`+num('w','Width',4,696)+num('h','Height',4,2000)+`</div>`;
+    h += num('line','Stroke',1,40);
+    h += `<div class="row"><label>Fill</label><input type="checkbox" data-k="fill" ${el.fill?'checked':''}></div>`;
+  } else if (el.type==='line'){
+    h += num('w','Length',4,800);
+    h += num('line','Thickness',1,40);
+    h += num('angle','Angle°',-180,180);
+  } else if (el.type==='image'){
+    h += `<div class="row split">`+num('w','Width',8,696)+num('h','Height',8,2000)+`</div>`;
+    h += `<div class="row"><label>Dither</label><input type="checkbox" data-k="dither" ${el.dither?'checked':''}></div>`;
+    h += field('Threshold', `<input type="number" data-k="threshold" value="${el.threshold}" min="0" max="255">`);
+    h += `<div class="row"><button data-act="reimg">Replace image…</button></div>`;
+  }
+  h += `<div class="row split">`+num('x','X',-50)+num('y','Y',-50)+`</div>`;
+  if (el.type!=='line') h += num('rotation','Rotation°',-180,180);
+  h += field('Color', `<select data-k="color"><option ${el.color==='black'?'selected':''}>black</option><option ${el.color==='white'?'selected':''}>white</option></select>`);
+  h += `<div class="row"><button data-act="dup">Duplicate</button><button data-act="del" style="background:#5a2230">Delete</button></div>`;
+  p.innerHTML = h;
+
+  p.querySelectorAll('[data-k]').forEach(inp=>{
+    const k=inp.dataset.k, ev = inp.type==='checkbox'?'change':'input';
+    inp.addEventListener(ev, ()=>{
+      let v = inp.type==='checkbox'?inp.checked : (inp.type==='number'?parseFloat(inp.value):inp.value);
+      if (inp.type==='number' && isNaN(v)) v=0;
+      el[k]=v;
+      if (el.type==='line'){ el.x2=el.x+el.w; el.y2=el.y; }
+      render(); markSel();
+    });
+  });
+  p.querySelectorAll('[data-sym]').forEach(b=>b.addEventListener('click',()=>{
+    const ta=p.querySelector('textarea[data-k="text"]');
+    const s=ta.selectionStart??el.text.length;
+    el.text = el.text.slice(0,s)+b.dataset.sym+el.text.slice(ta.selectionEnd??s);
+    ta.value=el.text; ta.focus(); ta.selectionStart=ta.selectionEnd=s+b.dataset.sym.length;
+    render(); markSel();
+  }));
+  p.querySelector('[data-act="del"]')?.addEventListener('click',delSel);
+  p.querySelector('[data-act="dup"]')?.addEventListener('click',()=>{
+    const c=JSON.parse(JSON.stringify(el)); c.id=state.seq++; c.x+=16; c.y+=16;
+    state.els.push(c); state.sel=c.id; render(); renderProps(); });
+  p.querySelector('[data-act="reimg"]')?.addEventListener('click',()=>pickImage(el));
+}
+
+function delSel(){ state.els=state.els.filter(e=>e.id!==state.sel); state.sel=null;
+  render(); renderProps(); }
+
+// ---- spec / preview / print -----------------------------------------
+function buildSpec(){
+  return { media:state.media,
+           length_mm: state.mediaInfo.kind==='continuous' && state.lenMode==='fixed' ? state.lenMm : null,
+           margin:16, copies:state.copies,
+           elements: state.els.map(({id,...e})=>e) };
+}
+
+async function doPreview(){
+  try{
+    const r = await fetch('/preview',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(buildSpec())});
+    if(!r.ok){ toast('Preview error: '+(await r.json()).error, true); return; }
+    const b = await r.blob(); $('#prevImg').src = URL.createObjectURL(b);
+    $('#prevImg').style.display='block';
+  }catch(e){ toast('Preview failed: '+e, true); }
+}
+
+async function doPrint(){
+  if(!state.els.length){ toast('Nothing to print', true); return; }
+  $('#printBtn').disabled=true; $('#printBtn').textContent='Printing…';
+  try{
+    const r = await fetch('/print_custom',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(buildSpec())});
+    const j = await r.json();
+    if(j.status==='ok') toast(`Printed ${j.copies}× to ${j.printer_ip}`);
+    else toast('Print error: '+j.error, true);
+  }catch(e){ toast('Print failed: '+e, true); }
+  $('#printBtn').disabled=false; $('#printBtn').textContent='Print';
+}
+
+// ---- templates -------------------------------------------------------
+async function loadTemplates(){
+  const names = await fetch('/api/templates').then(r=>r.json());
+  const s=$('#tplSelect'); s.innerHTML='<option value="">Templates…</option>'+
+    names.map(n=>`<option>${n}</option>`).join('');
+}
+async function saveTemplate(){
+  const name = prompt('Save design as:'); if(!name) return;
+  await fetch('/api/templates',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name, spec:buildSpec()})});
+  await loadTemplates(); $('#tplSelect').value=name; toast('Saved "'+name+'"');
+}
+async function loadTemplate(){
+  const name=$('#tplSelect').value; if(!name) return;
+  const spec = await fetch('/api/templates/'+encodeURIComponent(name)).then(r=>r.json());
+  applySpec(spec); toast('Loaded "'+name+'"');
+}
+async function deleteTemplate(){
+  const name=$('#tplSelect').value; if(!name) return;
+  if(!confirm('Delete template "'+name+'"?')) return;
+  await fetch('/api/templates/'+encodeURIComponent(name),{method:'DELETE'});
+  await loadTemplates(); toast('Deleted');
+}
+function applySpec(spec){
+  state.media=spec.media||'62'; $('#media').value=state.media;
+  state.mediaInfo=mediaInfo(state.media);
+  state.lenMode = spec.length_mm?'fixed':'auto'; $('#lenMode').value=state.lenMode;
+  if(spec.length_mm){ state.lenMm=spec.length_mm; $('#lenMm').value=spec.length_mm; }
+  $('#lenMm').style.display = state.lenMode==='fixed'?'':'none';
+  state.copies=spec.copies||1; $('#copies').value=state.copies;
+  state.els = (spec.elements||[]).map(e=>({id:state.seq++, ...e}));
+  state.sel=null; setMedia(state.media); renderProps();
+}
+
+// ---- bindings --------------------------------------------------------
+function bind(){
+  document.querySelectorAll('[data-add]').forEach(b=>
+    b.addEventListener('click',()=>addEl(b.dataset.add)));
+  $('#media').addEventListener('change',e=>setMedia(e.target.value));
+  $('#lenMode').addEventListener('change',e=>{ state.lenMode=e.target.value;
+    $('#lenMm').style.display = state.lenMode==='fixed'?'':'none'; render(); });
+  $('#lenMm').addEventListener('input',e=>{ state.lenMm=parseInt(e.target.value)||90; render(); });
+  $('#zoom').addEventListener('input',e=>{ state.zoom=e.target.value/100; render(); markSel(); });
+  $('#copies').addEventListener('input',e=>state.copies=parseInt(e.target.value)||1);
+  $('#previewBtn').addEventListener('click',doPreview);
+  $('#printBtn').addEventListener('click',doPrint);
+  $('#tplSave').addEventListener('click',saveTemplate);
+  $('#tplLoad').addEventListener('click',loadTemplate);
+  $('#tplDelete').addEventListener('click',deleteTemplate);
+  $('#stage').addEventListener('pointerdown',e=>{ if(e.target.id==='stage'){ state.sel=null; renderProps(); markSel(); }});
+  window.addEventListener('keydown',e=>{
+    if((e.key==='Delete'||e.key==='Backspace') && state.sel!==null &&
+       !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){ delSel(); }});
+  // fit zoom to width on load
+  const fit = Math.min(1, ($('#canvaswrap').clientWidth-60)/state.mediaInfo.width_px);
+  state.zoom = Math.max(0.2, fit); $('#zoom').value = Math.round(state.zoom*100);
+}
+
+function seedExample(){
+  addEl('text'); const t=state.els[0];
+  t.text='Hello 👋'; t.size=64; t.bold=true; t.x=24; t.y=24;
+  state.sel=t.id; render(); renderProps();
+}
+
+init();
+</script>
+</body>
+</html>
