@@ -33,7 +33,7 @@
   #stage { position:relative; background:#fff; transform-origin:top left;
            box-shadow:0 0 0 1px #000, 0 8px 30px rgba(0,0,0,.5); }
   #stage.round { border-radius:50%; }
-  .el { position:absolute; cursor:move; color:#000; }
+  .el { position:absolute; cursor:move; color:#000; touch-action:none; -webkit-user-select:none; user-select:none; }
   .el.sel { outline:2px solid var(--accent); outline-offset:1px; }
   .el.text { white-space:pre; }
   .el.white { color:#fff; background:#888; }
@@ -63,6 +63,24 @@
            transition:opacity .2s; pointer-events:none; max-width:70%; }
   #toast.show { opacity:.95; }
   .pill { font-size:11px; color:var(--mut); }
+
+  /* ---- Mobile / narrow: stack the 3 columns and enlarge tap targets ---- */
+  @media (max-width: 900px){
+    header { padding:6px 8px; gap:6px; }
+    header > strong { display:none; }            /* HA's panel bar already names it */
+    header .sep { display:none; }
+    label.fld { font-size:11px; gap:4px; }
+    select,input,textarea,button { padding:9px 10px; font-size:14px; }
+    input[type=number] { width:62px; }
+    #zoom { width:130px; }
+    main { flex-direction:column; overflow:auto; }
+    #canvaswrap { flex:none; height:42vh; padding:12px; }
+    aside, #preview { width:100%; border-left:none; border-top:1px solid var(--line); }
+    #preview img { max-width:100%; }
+    .row label { width:88px; }
+    .syms button { padding:7px 10px; min-width:36px; font-size:16px; }
+    .el .handle { width:18px; height:18px; right:-9px; bottom:-9px; }
+  }
 </style>
 </head>
 <body>
@@ -120,6 +138,7 @@
 
 <script>
 const $ = s => document.querySelector(s);
+const isMobile = () => window.matchMedia('(max-width:900px)').matches;
 let MEDIA = [], FONTS = [];
 const state = { media:'62', mediaInfo:null, lenMode:'auto', lenMm:90, zoom:1,
                 copies:1, els:[], sel:null, seq:1 };
@@ -183,7 +202,8 @@ function autoLen(){
 // ---- element factory -------------------------------------------------
 function addEl(type){
   const id = state.seq++;
-  const base = {id, type, x:24, y:24, color:'black', rotation:0};
+  const off = (state.els.length % 6) * 14;   // cascade so new elements don't stack exactly
+  const base = {id, type, x:24+off, y:24+off, color:'black', rotation:0};
   const defs = {
     text:{text:'Text', family:'Sans', size:44, bold:false, italic:false, underline:false, align:'left'},
     qr:{data:'https://', size:160, ecc:'M'},
@@ -288,13 +308,17 @@ function startDrag(e, el, d){
   e.preventDefault();
   state.sel = el.id; renderProps(); markSel();
   const sx=e.clientX, sy=e.clientY, x0=el.x||0, y0=el.y||0;
-  const move=ev=>{ el.x=Math.round(x0+(ev.clientX-sx)/state.zoom);
+  let moved=false;
+  const move=ev=>{ if(Math.abs(ev.clientX-sx)+Math.abs(ev.clientY-sy)>3) moved=true;
+                   el.x=Math.round(x0+(ev.clientX-sx)/state.zoom);
                    el.y=Math.round(y0+(ev.clientY-sy)/state.zoom);
                    d.style.left=el.x+'px'; d.style.top=el.y+'px';
                    if(el.type==='line'){ el.x2=el.x+el.w; el.y2=el.y; } };
   const up=()=>{ window.removeEventListener('pointermove',move);
     window.removeEventListener('pointerup',up); renderProps();
-    if (state.lenMode==='auto' && state.mediaInfo.kind==='continuous') render(); };
+    if (state.lenMode==='auto' && state.mediaInfo.kind==='continuous') render();
+    // On a phone the props live below the canvas: a tap (not a drag) jumps to them.
+    if (!moved && isMobile()) $('#props').scrollIntoView({behavior:'smooth',block:'start'}); };
   window.addEventListener('pointermove',move); window.addEventListener('pointerup',up);
 }
 
@@ -394,6 +418,7 @@ async function doPreview(){
     if(!r.ok){ toast('Preview error: '+(await r.json()).error, true); return; }
     const b = await r.blob(); $('#prevImg').src = URL.createObjectURL(b);
     $('#prevImg').style.display='block';
+    if (isMobile()) $('#preview').scrollIntoView({behavior:'smooth',block:'start'});
   }catch(e){ toast('Preview failed: '+e, true); }
 }
 
