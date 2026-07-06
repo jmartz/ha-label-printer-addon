@@ -54,6 +54,8 @@
   textarea { width:100%; min-height:64px; resize:vertical; }
   .syms { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:9px; }
   .syms button { padding:2px 7px; min-width:28px; }
+  .alignbtns { display:flex; gap:6px; flex:1; }
+  .alignbtns button { flex:1; }
   #preview { width:300px; background:var(--panel); border-left:1px solid var(--line);
              padding:12px; overflow:auto; }
   #preview img { width:100%; background:#fff; border:1px solid var(--line); border-radius:4px; }
@@ -73,9 +75,13 @@
     select,input,textarea,button { padding:9px 10px; font-size:14px; }
     input[type=number] { width:62px; }
     #zoom { width:130px; }
-    main { flex-direction:column; overflow:auto; }
+    main { flex-direction:column; overflow-y:auto; overflow-x:hidden; -webkit-overflow-scrolling:touch; }
+    /* flex:none so panels keep full height and the whole column scrolls (instead
+       of shrinking the preview into an unreachable sliver). overflow:visible so
+       `main` is the single scroller, not each panel. */
     #canvaswrap { flex:none; height:42vh; padding:12px; }
-    aside, #preview { width:100%; border-left:none; border-top:1px solid var(--line); }
+    aside, #preview { width:100%; flex:none; overflow:visible; max-height:none;
+                      border-left:none; border-top:1px solid var(--line); }
     #preview img { max-width:100%; }
     .row label { width:88px; }
     .syms button { padding:7px 10px; min-width:36px; font-size:16px; }
@@ -346,7 +352,7 @@ function renderProps(){
             <label><input type="checkbox" data-k="bold" ${el.bold?'checked':''}> Bold</label>
             <label><input type="checkbox" data-k="italic" ${el.italic?'checked':''}> Italic</label>
             <label><input type="checkbox" data-k="underline" ${el.underline?'checked':''}> Underln</label></div>`;
-    h += field('Align', `<select data-k="align">`+['left','center','right'].map(a=>`<option ${a===el.align?'selected':''}>${a}</option>`).join('')+`</select>`);
+    h += field('Justify', `<select data-k="align">`+['left','center','right'].map(a=>`<option ${a===el.align?'selected':''}>${a}</option>`).join('')+`</select>`);
   } else if (el.type==='qr'){
     h += field('Data', `<input data-k="data" value="${(el.data||'').replace(/"/g,'&quot;')}">`);
     h += num('size','Size px',40,696);
@@ -371,6 +377,11 @@ function renderProps(){
     h += `<div class="row"><button data-act="reimg">Replace image…</button></div>`;
   }
   h += `<div class="row split">`+num('x','X',-50)+num('y','Y',-50)+`</div>`;
+  h += `<div class="row"><label>Align</label><span class="alignbtns">
+          <button data-alignh="left">Left</button><button data-alignh="center">Center</button><button data-alignh="right">Right</button></span></div>`;
+  if (state.mediaInfo.length_px)   // fixed-height media: vertical alignment is meaningful
+    h += `<div class="row"><label>Vertical</label><span class="alignbtns">
+            <button data-alignv="top">Top</button><button data-alignv="middle">Middle</button><button data-alignv="bottom">Bottom</button></span></div>`;
   if (el.type!=='line') h += num('rotation','Rotation°',-180,180);
   h += field('Color', `<select data-k="color"><option ${el.color==='black'?'selected':''}>black</option><option ${el.color==='white'?'selected':''}>white</option></select>`);
   h += `<div class="row"><button data-act="dup">Duplicate</button><button data-act="del" style="background:#5a2230">Delete</button></div>`;
@@ -393,6 +404,8 @@ function renderProps(){
     ta.value=el.text; ta.focus(); ta.selectionStart=ta.selectionEnd=s+b.dataset.sym.length;
     render(); markSel();
   }));
+  p.querySelectorAll('[data-alignh]').forEach(b=>b.addEventListener('click',()=>alignH(b.dataset.alignh)));
+  p.querySelectorAll('[data-alignv]').forEach(b=>b.addEventListener('click',()=>alignV(b.dataset.alignv)));
   p.querySelector('[data-act="del"]')?.addEventListener('click',delSel);
   p.querySelector('[data-act="dup"]')?.addEventListener('click',()=>{
     const c=JSON.parse(JSON.stringify(el)); c.id=state.seq++; c.x+=16; c.y+=16;
@@ -402,6 +415,34 @@ function renderProps(){
 
 function delSel(){ state.els=state.els.filter(e=>e.id!==state.sel); state.sel=null;
   render(); renderProps(); }
+
+// Position the selected element on the label. Uses the rendered DOM size so it
+// works for any element type (text auto-sizes, shapes/QR/images have w/h).
+const ALIGN_MARGIN = 16;
+function alignH(where){
+  const el = state.els.find(e=>e.id===state.sel); if(!el) return;
+  const W = state.mediaInfo.width_px;
+  const dom = document.getElementById('el-'+el.id);
+  const w = dom ? dom.offsetWidth : (el.w||el.size||100);
+  el.x = where==='left' ? ALIGN_MARGIN
+       : where==='right' ? Math.round(W-ALIGN_MARGIN-w)
+       : Math.round((W-w)/2);
+  if (el.type==='line') el.x2 = el.x + el.w;
+  render(); markSel();
+  const xi=$('#props [data-k="x"]'); if(xi) xi.value=el.x;
+}
+function alignV(where){
+  const el = state.els.find(e=>e.id===state.sel); if(!el) return;
+  const H = stageSize().H;
+  const dom = document.getElementById('el-'+el.id);
+  const h = dom ? dom.offsetHeight : (el.h||el.size||40);
+  el.y = where==='top' ? ALIGN_MARGIN
+       : where==='bottom' ? Math.round(H-ALIGN_MARGIN-h)
+       : Math.round((H-h)/2);
+  if (el.type==='line') el.y2 = el.y;
+  render(); markSel();
+  const yi=$('#props [data-k="y"]'); if(yi) yi.value=el.y;
+}
 
 // ---- spec / preview / print -----------------------------------------
 function buildSpec(){
