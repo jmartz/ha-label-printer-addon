@@ -123,13 +123,6 @@
       <button id="previewBtn">Preview</button>
       <button id="printBtn" class="primary">Print</button>
     </div>
-    <span class="sep"></span>
-    <div class="grp">
-      <select id="tplSelect"><option value="">Templates…</option></select>
-      <button id="tplLoad">Load</button>
-      <button id="tplSave">Save</button>
-      <button id="tplDelete">Delete</button>
-    </div>
   </header>
   <main>
     <div id="canvaswrap"><div id="stageOuter"><div id="stage"></div></div></div>
@@ -169,7 +162,6 @@ async function init(){
     if (og.children.length) sel.appendChild(og);
   }
   sel.value = state.media;
-  await loadTemplates();
   setMedia(state.media);
   bind();
   seedExample();
@@ -476,40 +468,6 @@ async function doPrint(){
   $('#printBtn').disabled=false; $('#printBtn').textContent='Print';
 }
 
-// ---- templates -------------------------------------------------------
-async function loadTemplates(){
-  const names = await fetch('api/templates').then(r=>r.json());
-  const s=$('#tplSelect'); s.innerHTML='<option value="">Templates…</option>'+
-    names.map(n=>`<option>${n}</option>`).join('');
-}
-async function saveTemplate(){
-  const name = prompt('Save design as:'); if(!name) return;
-  await fetch('api/templates',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({name, spec:buildSpec()})});
-  await loadTemplates(); $('#tplSelect').value=name; toast('Saved "'+name+'"');
-}
-async function loadTemplate(){
-  const name=$('#tplSelect').value; if(!name) return;
-  const spec = await fetch('api/templates/'+encodeURIComponent(name)).then(r=>r.json());
-  applySpec(spec); toast('Loaded "'+name+'"');
-}
-async function deleteTemplate(){
-  const name=$('#tplSelect').value; if(!name) return;
-  if(!confirm('Delete template "'+name+'"?')) return;
-  await fetch('api/templates/'+encodeURIComponent(name),{method:'DELETE'});
-  await loadTemplates(); toast('Deleted');
-}
-function applySpec(spec){
-  state.media=spec.media||'62'; $('#media').value=state.media;
-  state.mediaInfo=mediaInfo(state.media);
-  state.lenMode = spec.length_mm?'fixed':'auto'; $('#lenMode').value=state.lenMode;
-  if(spec.length_mm){ state.lenMm=spec.length_mm; $('#lenMm').value=spec.length_mm; }
-  $('#lenMm').style.display = state.lenMode==='fixed'?'':'none';
-  state.copies=spec.copies||1; $('#copies').value=state.copies;
-  state.els = (spec.elements||[]).map(e=>({id:state.seq++, ...e}));
-  state.sel=null; setMedia(state.media); renderProps();
-}
-
 // ---- bindings --------------------------------------------------------
 function bind(){
   document.querySelectorAll('[data-add]').forEach(b=>
@@ -522,9 +480,6 @@ function bind(){
   $('#copies').addEventListener('input',e=>state.copies=parseInt(e.target.value)||1);
   $('#previewBtn').addEventListener('click',doPreview);
   $('#printBtn').addEventListener('click',doPrint);
-  $('#tplSave').addEventListener('click',saveTemplate);
-  $('#tplLoad').addEventListener('click',loadTemplate);
-  $('#tplDelete').addEventListener('click',deleteTemplate);
   $('#stage').addEventListener('pointerdown',e=>{ if(e.target.id==='stage'){ state.sel=null; renderProps(); markSel(); }});
   window.addEventListener('keydown',e=>{
     if((e.key==='Delete'||e.key==='Backspace') && state.sel!==null &&

@@ -35,9 +35,8 @@ PRINT_PORT = 9100
 # Where we remember a freshly-discovered IP between runs (HA add-on data dir).
 IP_CACHE = "/data/last_ip.txt"
 
-# Static designer UI + saved custom-label templates (HA add-on data dir).
+# Static designer UI (served from the add-on's own folder).
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
-TEMPLATES_FILE = "/data/templates.json"
 
 
 # ----------------------------------------------------------------------
@@ -227,7 +226,7 @@ def do_print():
 
 
 # ----------------------------------------------------------------------
-# Custom-label designer: static UI, fonts, media, preview, print, templates
+# Custom-label designer: static UI, fonts, media, preview, print
 # ----------------------------------------------------------------------
 
 @app.get("/")
@@ -317,54 +316,6 @@ def print_custom():
           f"media {spec.get('media', '62')}, {copies}x) to {ip}", flush=True)
     return jsonify(status="ok", printer_ip=ip, copies=copies,
                    size=[img.width, img.height])
-
-
-# --- saved design templates (named, reprintable) -----------------------
-
-def _load_templates():
-    try:
-        with open(TEMPLATES_FILE) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
-
-
-def _save_templates(data):
-    with open(TEMPLATES_FILE, "w") as f:
-        json.dump(data, f)
-
-
-@app.get("/api/templates")
-def list_templates():
-    return jsonify(sorted(_load_templates().keys()))
-
-
-@app.get("/api/templates/<name>")
-def get_template(name):
-    t = _load_templates().get(name)
-    return jsonify(t) if t is not None else (jsonify(error="not found"), 404)
-
-
-@app.post("/api/templates")
-def save_template():
-    body = request.get_json(silent=True) or {}
-    name = str(body.get("name", "")).strip()
-    spec = body.get("spec")
-    if not name or not isinstance(spec, dict):
-        return jsonify(error="need name + spec"), 400
-    data = _load_templates()
-    data[name] = spec
-    _save_templates(data)
-    return jsonify(status="ok", name=name)
-
-
-@app.delete("/api/templates/<name>")
-def delete_template(name):
-    data = _load_templates()
-    if data.pop(name, None) is None:
-        return jsonify(error="not found"), 404
-    _save_templates(data)
-    return jsonify(status="ok")
 
 
 if __name__ == "__main__":
