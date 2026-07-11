@@ -41,7 +41,8 @@ def load_config():
         "www_dir": "/homeassistant/www/sdr",
         "default_band": "Airband (118-137 MHz)",
         "bin_width_hz": 100000,
-        "sweep_interval_s": 3,
+        "sweeps_per_batch": 30,
+        "sweep_interval_s": 1,
         "waterfall_rows": 120,
         "waterfall_cols": 600,
         "lna_gain": 32,
@@ -52,8 +53,8 @@ def load_config():
             cfg.update({k: v for k, v in json.load(f).items() if v not in (None, "")})
     except FileNotFoundError:
         pass
-    for k in ("mqtt_port", "bin_width_hz", "sweep_interval_s", "waterfall_rows",
-              "waterfall_cols", "lna_gain", "vga_gain"):
+    for k in ("mqtt_port", "bin_width_hz", "sweeps_per_batch", "sweep_interval_s",
+              "waterfall_rows", "waterfall_cols", "lna_gain", "vga_gain"):
         cfg[k] = int(cfg[k])
     return cfg
 
@@ -105,12 +106,18 @@ def hackrf_info():
 
 
 def run_sweep(lo_mhz, hi_mhz):
+    # Run a BATCH of sweeps in one hackrf_sweep process (-N) instead of spawning a
+    # fresh one-shot every few seconds. Rapidly opening/closing the HackRF's
+    # streaming (the old `-1` per call) wedges its USB after ~10-15 cycles; one
+    # process doing N sweeps cuts that churn ~Nx. We max-hold across the batch so
+    # brief signals still show up.
     lo = int(lo_mhz)
     hi = int(max(hi_mhz, lo_mhz + 1))
     cmd = ["hackrf_sweep", "-f", f"{lo}:{hi}", "-w", str(CFG["bin_width_hz"]),
-           "-l", str(CFG["lna_gain"]), "-g", str(CFG["vga_gain"]), "-1"]
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-    freqs, powers = [], []
+           "-l", str(CFG["lna_gain"]), "-g", str(CFG["vga_gain"]),
+           "-N", str(CFG["sweeps_per_batch"])]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    bins = {}
     for line in out.stdout.splitlines():
         parts = [p.strip() for p in line.split(",")]
         if len(parts) < 7:
@@ -122,12 +129,17 @@ def run_sweep(lo_mhz, hi_mhz):
         except ValueError:
             continue
         for i, v in enumerate(vals):
-            freqs.append(hz_low + (i + 0.5) * binw)
-            powers.append(v)
-    if not freqs:
+            f = round(hz_low + (i + 0.5) * binw)
+            if f in bins:
+                if v > bins[f]:
+                    bins[f] = v
+            else:
+                bins[f] = v
+    if not bins:
         raise RuntimeError("hackrf_sweep produced no data: " + (out.stderr or "")[:300])
-    order = np.argsort(freqs)
-    return np.asarray(freqs)[order], np.asarray(powers)[order]
+    freqs = np.asarray(sorted(bins), dtype=float)
+    powers = np.asarray([bins[round(f)] for f in freqs], dtype=float)
+    return freqs, powers
 
 
 # ---------------------------------------------------------------- rendering
@@ -188,12 +200,14 @@ def do_sweep(client):
     band = state["band"]
     lo, hi = band_range_mhz(band)
     with state["lock"]:
-        pub(client, "sdr/spectrum/status", {"running": True, "band": band,
-            "peak_freq_mhz": None, "peak_dbm": None, "noise_floor_dbm": None})
+        # Note: we do NOT publish a "running:true" status with null numerics before
+        # the sweep -- that blanked the peak/level/noise sensors to unknown between
+        # sweeps. Instead we only publish real stats after a good sweep, and on
+        # error we leave the last good values in place.
         try:
             freqs, powers = run_sweep(lo, hi)
             pk = int(np.argmax(powers))
-            stats = {"running": False, "band": band,
+            stats = {"running": True, "band": band,
                      "peak_freq_mhz": round(float(freqs[pk]) / 1e6, 3),
                      "peak_dbm": round(float(powers[pk]), 1),
                      "noise_floor_dbm": round(float(np.percentile(powers, 20)), 1)}
@@ -204,8 +218,6 @@ def do_sweep(client):
                 f"{stats['peak_dbm']}dB noise {stats['noise_floor_dbm']}dB")
         except Exception as e:  # noqa: BLE001
             log("sweep error:", e)
-            pub(client, "sdr/spectrum/status", {"running": False, "band": band,
-                "peak_freq_mhz": None, "peak_dbm": None, "noise_floor_dbm": None})
 
 
 def on_connect(client, userdata, flags, rc, *a):
