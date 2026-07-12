@@ -1,7 +1,7 @@
 # Home Assistant add-on manifest — HackRF Spectrum.
 # A second add-on in "Jim's Home Assistant Add-ons" (alongside label_printer).
 name: "HackRF Spectrum"
-version: "1.4.0"
+version: "1.5.0"
 slug: "hackrf_spectrum"
 description: "Sweeps the RF spectrum with a HackRF One and renders a live waterfall + peak/noise sensors to Home Assistant (drives the SDR Spectrum dashboard)."
 url: "https://github.com/jmartz/ha-label-printer-addon/tree/main/hackrf_spectrum"

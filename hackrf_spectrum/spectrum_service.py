@@ -218,8 +218,10 @@ def do_sweep(client):
             pub(client, "sdr/spectrum/image", "/local/sdr/spectrum.png")
             log(f"swept {band}: peak {stats['peak_freq_mhz']}MHz "
                 f"{stats['peak_dbm']}dB noise {stats['noise_floor_dbm']}dB")
+            return True
         except Exception as e:  # noqa: BLE001
             log("sweep error:", e)
+            return False
 
 
 def on_connect(client, userdata, flags, rc, *a):
@@ -328,6 +330,33 @@ def transfer_test(rate):
     return got[-1].strip() if got else "FAIL (no throughput)"
 
 
+def hackrf_healthy():
+    """Quick 2 Msps capture: healthy if real samples arrive (power != nan)."""
+    try:
+        r = subprocess.run(
+            ["hackrf_transfer", "-r", "/dev/null", "-f", "100000000",
+             "-s", "2000000", "-n", "2000000", "-l", "24", "-g", "16"],
+            capture_output=True, text=True, timeout=15)
+        out = r.stdout + r.stderr
+        return "average power" in out and "nan" not in out
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def ensure_healthy(tag=""):
+    """If RX is wedged, USB-reset the device (clears the stuck streaming state).
+    A reset may re-enumerate the device and bounce the add-on; the startup gate
+    only resets when actually wedged, so it converges instead of looping."""
+    if hackrf_healthy():
+        return True
+    log(f"HackRF RX wedged {tag}-> USB reset")
+    usb_reset()
+    time.sleep(8)
+    ok = hackrf_healthy()
+    log("  recovered" if ok else "  still wedged after reset")
+    return ok
+
+
 def do_diagnostic():
     """Can a USB reset un-wedge the HackRF's RX streaming? Reset it, then test
     hackrf_transfer. If streaming works AFTER a reset, we can auto-recover in
@@ -363,6 +392,10 @@ def main():
     for line in txt.splitlines():
         log("  " + line)
 
+    # Self-heal: the HackRF's RX wedges into a "no samples" state; a USB reset
+    # clears it. Reset at startup only if actually wedged (so we don't loop).
+    ensure_healthy("(startup) ")
+
     client = mqtt.Client()
     client.username_pw_set(CFG["mqtt_user"], CFG["mqtt_pass"])
     client.on_connect = on_connect
@@ -382,8 +415,16 @@ def main():
             time.sleep(30)
     threading.Thread(target=heartbeat, daemon=True).start()
 
+    fails = 0
     while True:
-        do_sweep(client)
+        if do_sweep(client):
+            fails = 0
+        else:
+            fails += 1
+            if fails >= 5:  # streaming stalled -> reset and recover
+                log("stall detected (%d consecutive) -> recovering" % fails)
+                ensure_healthy("(stall) ")
+                fails = 0
         time.sleep(CFG["sweep_interval_s"])
 
 
