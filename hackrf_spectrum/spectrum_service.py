@@ -48,6 +48,7 @@ def load_config():
         "lna_gain": 32,
         "vga_gain": 40,
         "flash_firmware": False,
+        "diagnostic": False,
     }
     try:
         with open("/data/options.json") as f:
@@ -281,8 +282,52 @@ def do_flash():
         log("FLASH ERROR:", e)
 
 
+def do_diagnostic():
+    """Characterize what this HackRF can actually stream: hackrf_transfer at
+    stepped sample rates (find the max sustainable throughput), then a small
+    hackrf_sweep. hackrf_sweep is fixed at 20 Msps; if lower transfer rates work,
+    we can build the spectrum with hackrf_transfer+FFT at a sustainable rate."""
+    log("=== HACKRF DIAGNOSTIC ===")
+    ok, txt = hackrf_info()
+    for line in txt.splitlines():
+        log("  " + line)
+    for rate in (20000000, 16000000, 12000000, 10000000, 8000000, 6000000,
+                 4000000, 2000000):
+        n = rate * 3  # ~3 seconds of samples
+        log(f"--- hackrf_transfer @ {rate/1e6:.0f} Msps ---")
+        try:
+            r = subprocess.run(
+                ["hackrf_transfer", "-r", "/dev/null", "-f", "100000000",
+                 "-s", str(rate), "-n", str(n), "-l", "24", "-g", "16"],
+                capture_output=True, text=True, timeout=25)
+            hits = [ln for ln in (r.stdout + r.stderr).splitlines()
+                    if "MiB/second" in ln or "Couldn't transfer" in ln
+                    or "streaming" in ln.lower() or "error" in ln.lower()]
+            got = [ln for ln in hits if "MiB/second" in ln]
+            if got:
+                log("  OK -> " + got[-1].strip())
+            else:
+                log("  FAIL -> " + (hits[0].strip() if hits else "no data"))
+        except Exception as e:  # noqa: BLE001
+            log("  FAIL ->", e)
+    log("--- hackrf_sweep 88:108 -N 3 ---")
+    try:
+        r = subprocess.run(["hackrf_sweep", "-f", "88:108", "-w", "100000", "-N", "3"],
+                           capture_output=True, text=True, timeout=25)
+        log(f"  rc {r.returncode}, data lines {len(r.stdout.splitlines())}")
+        for ln in r.stderr.splitlines()[-3:]:
+            log("  " + ln)
+    except Exception as e:  # noqa: BLE001
+        log("  sweep FAIL ->", e)
+    log("=== DIAGNOSTIC DONE (set diagnostic=false) ===")
+
+
 def main():
     log("starting; WWW_DIR =", WWW_DIR, "| MQTT", CFG["mqtt_host"])
+    if CFG.get("diagnostic"):
+        do_diagnostic()
+        while True:
+            time.sleep(3600)
     if CFG.get("flash_firmware"):
         do_flash()
         while True:  # stay alive so the add-on doesn't crash-loop; do nothing
