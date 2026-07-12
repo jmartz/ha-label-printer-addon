@@ -282,43 +282,69 @@ def do_flash():
         log("FLASH ERROR:", e)
 
 
-def do_diagnostic():
-    """Characterize what this HackRF can actually stream: hackrf_transfer at
-    stepped sample rates (find the max sustainable throughput), then a small
-    hackrf_sweep. hackrf_sweep is fixed at 20 Msps; if lower transfer rates work,
-    we can build the spectrum with hackrf_transfer+FFT at a sustainable rate."""
-    log("=== HACKRF DIAGNOSTIC ===")
-    ok, txt = hackrf_info()
-    for line in txt.splitlines():
-        log("  " + line)
-    for rate in (20000000, 16000000, 12000000, 10000000, 8000000, 6000000,
-                 4000000, 2000000):
-        n = rate * 3  # ~3 seconds of samples
-        log(f"--- hackrf_transfer @ {rate/1e6:.0f} Msps ---")
+def find_hackrf_devnode():
+    import glob
+    for d in glob.glob("/sys/bus/usb/devices/*"):
         try:
-            r = subprocess.run(
-                ["hackrf_transfer", "-r", "/dev/null", "-f", "100000000",
-                 "-s", str(rate), "-n", str(n), "-l", "24", "-g", "16"],
-                capture_output=True, text=True, timeout=25)
-            hits = [ln for ln in (r.stdout + r.stderr).splitlines()
-                    if "MiB/second" in ln or "Couldn't transfer" in ln
-                    or "streaming" in ln.lower() or "error" in ln.lower()]
-            got = [ln for ln in hits if "MiB/second" in ln]
-            if got:
-                log("  OK -> " + got[-1].strip())
-            else:
-                log("  FAIL -> " + (hits[0].strip() if hits else "no data"))
-        except Exception as e:  # noqa: BLE001
-            log("  FAIL ->", e)
-    log("--- hackrf_sweep 88:108 -N 3 ---")
+            vid = open(d + "/idVendor").read().strip()
+            pid = open(d + "/idProduct").read().strip()
+            if vid == "1d50" and pid == "6089":
+                busnum = int(open(d + "/busnum").read().strip())
+                devnum = int(open(d + "/devnum").read().strip())
+                return f"/dev/bus/usb/{busnum:03d}/{devnum:03d}"
+        except OSError:
+            continue
+    return None
+
+
+def usb_reset():
+    """Electrically reset the HackRF's USB (like a re-plug) via USBDEVFS_RESET."""
+    import fcntl
+    node = find_hackrf_devnode()
+    if not node:
+        log("  usb_reset: device node not found")
+        return False
+    usbdevfs_reset = (ord('U') << 8) | 20  # _IO('U', 20)
     try:
-        r = subprocess.run(["hackrf_sweep", "-f", "88:108", "-w", "100000", "-N", "3"],
-                           capture_output=True, text=True, timeout=25)
-        log(f"  rc {r.returncode}, data lines {len(r.stdout.splitlines())}")
-        for ln in r.stderr.splitlines()[-3:]:
-            log("  " + ln)
-    except Exception as e:  # noqa: BLE001
-        log("  sweep FAIL ->", e)
+        fd = os.open(node, os.O_WRONLY)
+        try:
+            fcntl.ioctl(fd, usbdevfs_reset, 0)
+        finally:
+            os.close(fd)
+        log("  usb_reset: OK on " + node)
+        return True
+    except OSError as e:
+        log("  usb_reset: failed " + str(e))
+        return False
+
+
+def transfer_test(rate):
+    n = rate * 3
+    r = subprocess.run(
+        ["hackrf_transfer", "-r", "/dev/null", "-f", "100000000",
+         "-s", str(rate), "-n", str(n), "-l", "24", "-g", "16"],
+        capture_output=True, text=True, timeout=25)
+    got = [ln for ln in (r.stdout + r.stderr).splitlines() if "MiB/second" in ln]
+    return got[-1].strip() if got else "FAIL (no throughput)"
+
+
+def do_diagnostic():
+    """Can a USB reset un-wedge the HackRF's RX streaming? Reset it, then test
+    hackrf_transfer. If streaming works AFTER a reset, we can auto-recover in
+    software (reset-on-stall) instead of needing a physical power-cycle."""
+    log("=== HACKRF DIAGNOSTIC v2: USB-reset recovery ===")
+    ok, txt = hackrf_info()
+    log("  before: " + ("opens" if ok else "NOT opening"))
+    log("--- baseline transfer @ 8 Msps (pre-reset) ---")
+    log("  " + transfer_test(8000000))
+    log("--- USB RESET ---")
+    usb_reset()
+    time.sleep(6)  # let it re-enumerate
+    ok2, _ = hackrf_info()
+    log("  after reset: " + ("opens" if ok2 else "NOT opening"))
+    for rate in (8000000, 4000000, 2000000):
+        log(f"--- transfer @ {rate//1000000} Msps (post-reset) ---")
+        log("  " + transfer_test(rate))
     log("=== DIAGNOSTIC DONE (set diagnostic=false) ===")
 
 
