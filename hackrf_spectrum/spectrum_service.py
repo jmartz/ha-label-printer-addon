@@ -47,6 +47,7 @@ def load_config():
         "waterfall_cols": 600,
         "lna_gain": 32,
         "vga_gain": 40,
+        "flash_firmware": False,
     }
     try:
         with open("/data/options.json") as f:
@@ -237,8 +238,55 @@ def on_message(client, userdata, msg):
         log("bad request:", e)
 
 
+FW_URL = ("https://github.com/greatscottgadgets/hackrf/releases/download/"
+          "v2024.02.1/hackrf-2024.02.1.tar.xz")
+
+
+def do_flash():
+    """One-shot: download the 2024.02.1 release, flash hackrf_one_usb.bin via
+    hackrf_spiflash (control-transfer path = reliable even though streaming isn't),
+    then exit. Enabled by the flash_firmware option; turn it back off after."""
+    import urllib.request
+    import io
+    import tarfile
+    import glob
+    log("=== FIRMWARE FLASH MODE ===")
+    ok, txt = hackrf_info()
+    log("before:", "opened" if ok else "NOT opened")
+    for line in txt.splitlines():
+        log("  " + line)
+    try:
+        log("downloading", FW_URL)
+        data = urllib.request.urlopen(FW_URL, timeout=180).read()
+        tf = tarfile.open(fileobj=io.BytesIO(data), mode="r:xz")
+        tf.extractall("/tmp/fw")
+        bins = glob.glob("/tmp/fw/**/hackrf_one_usb.bin", recursive=True)
+        if not bins:
+            log("ERROR: hackrf_one_usb.bin not found in archive")
+            return
+        binp = bins[0]
+        log("flashing", binp)
+        r = subprocess.run(["hackrf_spiflash", "-w", binp],
+                           capture_output=True, text=True, timeout=240)
+        log("spiflash rc", r.returncode)
+        for line in (r.stdout + r.stderr).splitlines():
+            log("  " + line)
+        log("=== FLASH COMPLETE — POWER-CYCLE THE HACKRF, then set flash_firmware=false ===")
+        time.sleep(3)
+        ok2, txt2 = hackrf_info()
+        log("after (pre power-cycle):", "opened" if ok2 else "not opened")
+        for line in txt2.splitlines():
+            log("  " + line)
+    except Exception as e:  # noqa: BLE001
+        log("FLASH ERROR:", e)
+
+
 def main():
     log("starting; WWW_DIR =", WWW_DIR, "| MQTT", CFG["mqtt_host"])
+    if CFG.get("flash_firmware"):
+        do_flash()
+        while True:  # stay alive so the add-on doesn't crash-loop; do nothing
+            time.sleep(3600)
     ok, txt = hackrf_info()
     log("hackrf_info:", "OPENED OK" if ok else "FAILED TO OPEN")
     for line in txt.splitlines():
