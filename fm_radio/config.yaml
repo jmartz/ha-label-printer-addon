@@ -14,9 +14,9 @@ arch:
 init: false
 usb: true
 ports:
-  8000/tcp: 8000
+  8000/tcp: 8010   # host 8000 was already taken; icecast is on 8000 inside the container
 ports_description:
-  8000/tcp: "Icecast MP3 audio stream (/radio.mp3)"
+  8000/tcp: "Icecast MP3 audio stream (host :8010/radio.mp3)"
 options:
   frequency_mhz: 102.7
   gain: 30
