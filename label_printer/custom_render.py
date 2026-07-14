@@ -41,8 +41,39 @@ _KIND = {
     FormFactor.ROUND_DIE_CUT: "round",
 }
 
+# ----------------------------------------------------------------------
+# Printer registry: each printer has its own DPI (px-per-mm) and media list.
+# The Brother is driven by brother_ql; the Niimbot B1 (203.2 dpi = 8 dots/mm)
+# has a hand-defined list of its die-cut/round rolls. Coordinates in a design
+# spec are always in the SELECTED printer's pixels, so the browser canvas and
+# this renderer agree.
+# ----------------------------------------------------------------------
 
-def media_table():
+NIIMBOT_PX_PER_MM = 8.0            # Niimbot B1 = 203.2 dpi
+
+# width_px = across the print head, length_px = feed direction, both at 8 px/mm.
+# The 50x30 roll is the common default; the others cover the usual B1 rolls.
+_NIIMBOT_MEDIA = [
+    {"code": "b1_50x30",  "name": "50 x 30 mm", "kind": "die-cut", "width_px": 400, "length_px": 240, "round": False},
+    {"code": "b1_40x30",  "name": "40 x 30 mm", "kind": "die-cut", "width_px": 320, "length_px": 240, "round": False},
+    {"code": "b1_50x70",  "name": "50 x 70 mm", "kind": "die-cut", "width_px": 400, "length_px": 560, "round": False},
+    {"code": "b1_50x50r", "name": "50 mm round", "kind": "round",  "width_px": 400, "length_px": 400, "round": True},
+]
+
+PRINTERS = {
+    "brother": {"name": "Brother QL-820NWB", "px_per_mm": PX_PER_MM},
+    "niimbot": {"name": "Niimbot B1",        "px_per_mm": NIIMBOT_PX_PER_MM},
+}
+
+# Default media per printer (used when a spec omits one).
+DEFAULT_MEDIA = {"brother": "62", "niimbot": "b1_50x30"}
+
+
+def px_per_mm(printer="brother"):
+    return PRINTERS.get(printer, PRINTERS["brother"])["px_per_mm"]
+
+
+def _brother_media():
     """Every QL-820NWB-compatible media, widest dimension <= 62 mm.
 
     Returns dicts: code, name, kind, width_px, length_px (0 == continuous),
@@ -68,11 +99,18 @@ def media_table():
     return out
 
 
-def media_by_code(code):
-    for m in media_table():
+def media_table(printer="brother"):
+    """Media list for the given printer (see _brother_media / _NIIMBOT_MEDIA)."""
+    if printer == "niimbot":
+        return [dict(m) for m in _NIIMBOT_MEDIA]
+    return _brother_media()
+
+
+def media_by_code(code, printer="brother"):
+    for m in media_table(printer):
         if m["code"] == code:
             return m
-    raise ValueError(f"Unknown media code: {code!r}")
+    raise ValueError(f"Unknown media code: {code!r} for printer {printer!r}")
 
 
 # ----------------------------------------------------------------------
@@ -326,7 +364,9 @@ def _paste(base, tile, x, y, rotation):
 
 def render_spec(spec):
     """Render a design spec to an RGB PIL image sized for its media."""
-    media = media_by_code(spec.get("media", "62"))
+    printer = spec.get("printer", "brother")
+    ppm = px_per_mm(printer)
+    media = media_by_code(spec.get("media", DEFAULT_MEDIA.get(printer, "62")), printer)
     W = media["width_px"]
     margin = int(spec.get("margin", 16))
     elements = spec.get("elements", [])
@@ -335,9 +375,9 @@ def render_spec(spec):
     if media["length_px"]:
         H = media["length_px"]                       # die-cut / round: fixed
     elif spec.get("length_mm"):
-        H = int(round(float(spec["length_mm"]) * PX_PER_MM))
+        H = int(round(float(spec["length_mm"]) * ppm))
     else:
-        H = _auto_length(elements, margin)           # continuous: fit content
+        H = _auto_length(elements, margin, ppm)      # continuous: fit content
 
     base = Image.new("RGBA", (W, max(H, 1)), (255, 255, 255, 255))
     for el in elements:
@@ -382,9 +422,9 @@ def _element_extent(el):
     return y + int(el.get("h", 80))
 
 
-def _auto_length(elements, margin):
+def _auto_length(elements, margin, ppm=PX_PER_MM):
     if not elements:
-        return int(40 * PX_PER_MM)                   # blank ~40 mm default
+        return int(40 * ppm)                         # blank ~40 mm default
     bottom = max(_element_extent(el) for el in elements)
     return int(bottom + margin)
 

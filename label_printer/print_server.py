@@ -12,6 +12,7 @@ can be previewed off the printer). This module is just the printer plumbing:
 find the QL on the LAN and send the raster.
 """
 
+import base64
 import io
 import json
 import os
@@ -32,6 +33,15 @@ import custom_render
 MODEL = "QL-820NWB"
 PRINT_PORT = 9100
 
+# The Niimbot B1 is BLE-only and owned by Home Assistant's hass-niimbot
+# integration -- the add-on can't share that Bluetooth adapter. So we print to
+# it by rendering the design to a PNG and calling HA's `niimbot.print` service
+# (as a single full-canvas `dlimg` element, so it's pixel-for-pixel identical to
+# the on-screen design) through the Supervisor's Core API proxy. Needs
+# `homeassistant_api: true` in config.yaml, which populates SUPERVISOR_TOKEN.
+SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
+CORE_API = "http://supervisor/core/api"
+
 # Where we remember a freshly-discovered IP between runs (HA add-on data dir).
 IP_CACHE = "/data/last_ip.txt"
 
@@ -44,7 +54,8 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 # ----------------------------------------------------------------------
 
 def load_config():
-    cfg = {"printer_ip": "192.168.10.83", "label": "62"}
+    cfg = {"printer_ip": "192.168.10.120", "label": "62",
+           "niimbot_device_id": "18e876934ab0f9f57f0593b24044ae1b"}
     try:
         with open("/data/options.json") as f:
             cfg.update({k: v for k, v in json.load(f).items() if v})
@@ -53,6 +64,7 @@ def load_config():
     # Env vars override -- handy when testing outside Home Assistant.
     cfg["printer_ip"] = os.environ.get("PRINTER_IP", cfg["printer_ip"])
     cfg["label"] = os.environ.get("LABEL", cfg["label"])
+    cfg["niimbot_device_id"] = os.environ.get("NIIMBOT_DEVICE_ID", cfg["niimbot_device_id"])
     return cfg
 
 
@@ -207,6 +219,53 @@ def print_image(img, label_code):
     return ip
 
 
+def print_niimbot(img, spec):
+    """Print a PIL image on the Niimbot B1 via HA's niimbot.print service.
+
+    The whole rendered label is sent as ONE full-canvas `dlimg` element (a
+    base64 PNG data-URI), so what prints is pixel-identical to the designer --
+    imagespec just blits it. Requires the add-on's SUPERVISOR_TOKEN (granted by
+    homeassistant_api) and a configured niimbot_device_id. Returns a label for
+    logging; raises RuntimeError on missing config, propagates HTTP errors.
+    """
+    cfg = load_config()
+    device_id = cfg.get("niimbot_device_id")
+    if not device_id:
+        raise RuntimeError("No niimbot_device_id set in the add-on options.")
+    if not SUPERVISOR_TOKEN:
+        raise RuntimeError(
+            "Add-on lacks Home Assistant API access (SUPERVISOR_TOKEN missing) "
+            "-- set 'homeassistant_api: true' in config.yaml.")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    W, H = img.width, img.height
+    body = {
+        "device_id": device_id,
+        "width": W,
+        "height": H,
+        "density": int(spec.get("density", 3)),
+        "dither": False,                              # image is already 1-bit
+        "payload": [{
+            "type": "dlimg", "x": 0, "y": 0, "xsize": W, "ysize": H,
+            "mode": "stretch", "dither": False,
+            "url": f"data:image/png;base64,{b64}",
+        }],
+    }
+    req = urllib.request.Request(
+        f"{CORE_API}/services/niimbot/print",
+        data=json.dumps(body).encode(),
+        method="POST",
+        headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}",
+                 "Content-Type": "application/json"},
+    )
+    # BLE connect + print can take several seconds; the service call blocks until
+    # the print finishes, so allow a generous timeout.
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        resp.read()
+    return f"Niimbot B1 ({device_id[:8]}…)"
+
+
 @app.post("/print")
 def do_print():
     cfg = load_config()
@@ -235,9 +294,16 @@ def designer():
     return send_from_directory(WEB_DIR, "designer.html")
 
 
+@app.get("/api/printers")
+def api_printers():
+    return jsonify([{"id": pid, "name": p["name"], "px_per_mm": p["px_per_mm"]}
+                    for pid, p in custom_render.PRINTERS.items()])
+
+
 @app.get("/api/media")
 def api_media():
-    return jsonify(custom_render.media_table())
+    printer = request.args.get("printer", "brother")
+    return jsonify(custom_render.media_table(printer))
 
 
 @app.get("/api/fonts")
@@ -300,21 +366,25 @@ def print_custom():
         img = custom_render.render_spec(spec)
     except Exception as e:
         return jsonify(status="error", error=str(e)), 400
+
+    printer = spec.get("printer", "brother")
+    media = spec.get("media", custom_render.DEFAULT_MEDIA.get(printer, "62"))
+    copies = max(1, int(spec.get("copies", 1)))
+    send_one = (lambda: print_niimbot(img, spec)) if printer == "niimbot" \
+        else (lambda: print_image(img, media))
+
     try:
-        ip = print_image(img, spec.get("media", "62"))
+        dest = send_one()                            # first copy
+        for _ in range(copies - 1):
+            send_one()
     except RuntimeError as e:
         return jsonify(status="error", error=str(e)), 503
     except Exception as e:
         return jsonify(status="error", error=str(e)), 502
-    copies = max(1, int(spec.get("copies", 1)))
-    for _ in range(copies - 1):
-        try:
-            print_image(img, spec.get("media", "62"))
-        except Exception as e:
-            return jsonify(status="error", error=str(e)), 502
-    print(f"Printed custom label ({img.width}x{img.height}, "
-          f"media {spec.get('media', '62')}, {copies}x) to {ip}", flush=True)
-    return jsonify(status="ok", printer_ip=ip, copies=copies,
+
+    print(f"Printed custom label ({img.width}x{img.height}, {printer}/{media}, "
+          f"{copies}x) to {dest}", flush=True)
+    return jsonify(status="ok", printer=printer, printer_ip=dest, copies=copies,
                    size=[img.width, img.height])
 
 

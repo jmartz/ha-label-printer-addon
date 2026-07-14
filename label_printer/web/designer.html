@@ -96,6 +96,9 @@
       <strong>🏷️ Label Designer</strong>
     </div>
     <span class="sep"></span>
+    <label class="fld">Printer
+      <select id="printer"></select>
+    </label>
     <label class="fld">Media
       <select id="media"></select>
     </label>
@@ -138,8 +141,10 @@
 <script>
 const $ = s => document.querySelector(s);
 const isMobile = () => window.matchMedia('(max-width:900px)').matches;
-let MEDIA = [], FONTS = [];
-const state = { media:'62', mediaInfo:null, lenMode:'auto', lenMm:90, zoom:1,
+let MEDIA = [], FONTS = [], PRINTERS = [];
+const DEFAULT_MEDIA = { brother:'62', niimbot:'b1_50x30' };
+const state = { printer:'brother', pxPerMm:300/25.4,
+                media:'62', mediaInfo:null, lenMode:'auto', lenMm:90, zoom:1,
                 copies:1, els:[], sel:null, seq:1 };
 let pendingImg = null;
 
@@ -149,10 +154,26 @@ function toast(msg, bad){ const t=$('#toast'); t.textContent=msg;
 
 // ---- init ------------------------------------------------------------
 async function init(){
-  [MEDIA, FONTS] = await Promise.all([
-    fetch('api/media').then(r=>r.json()),
+  [PRINTERS, FONTS] = await Promise.all([
+    fetch('api/printers').then(r=>r.json()),
     fetch('api/fonts').then(r=>r.json())]);
-  const sel = $('#media');
+  const psel = $('#printer');
+  PRINTERS.forEach(p=>{ const o=document.createElement('option');
+    o.value=p.id; o.textContent=p.name; psel.appendChild(o); });
+  psel.value = state.printer;
+  await loadMedia(state.printer);
+  bind();
+  seedExample();
+  updatePrintBtn();
+}
+
+// Load a printer's media list, rebuild the Media dropdown, set the canvas DPI,
+// and select that printer's default size. Called on load and on printer change.
+async function loadMedia(printer){
+  const info = PRINTERS.find(p=>p.id===printer) || PRINTERS[0];
+  state.printer = info.id; state.pxPerMm = info.px_per_mm;
+  MEDIA = await fetch('api/media?printer='+encodeURIComponent(info.id)).then(r=>r.json());
+  const sel = $('#media'); sel.innerHTML='';
   const groups = {continuous:'Continuous (any length)', 'die-cut':'Die-cut', round:'Round'};
   for (const kind of Object.keys(groups)){
     const og = document.createElement('optgroup'); og.label = groups[kind];
@@ -161,10 +182,10 @@ async function init(){
       og.appendChild(o); });
     if (og.children.length) sel.appendChild(og);
   }
+  const want = DEFAULT_MEDIA[info.id];
+  state.media = (want && MEDIA.some(m=>m.code===want)) ? want : MEDIA[0].code;
   sel.value = state.media;
   setMedia(state.media);
-  bind();
-  seedExample();
 }
 
 function mediaInfo(code){ return MEDIA.find(m=>m.code===code); }
@@ -176,18 +197,17 @@ function setMedia(code){
   render();
 }
 
-const PX_PER_MM = 300/25.4;
 function stageSize(){
   const W = state.mediaInfo.width_px;
   let H;
   if (state.mediaInfo.kind!=='continuous') H = state.mediaInfo.length_px;  // fixed die
-  else if (state.lenMode==='fixed') H = Math.round(state.lenMm * PX_PER_MM);
+  else if (state.lenMode==='fixed') H = Math.round(state.lenMm * state.pxPerMm);
   else H = autoLen();
   return {W, H:Math.max(H,40)};
 }
 
 function autoLen(){
-  if (!state.els.length) return Math.round(40*(300/25.4));
+  if (!state.els.length) return Math.round(40*state.pxPerMm);
   let bottom = 0;
   for (const el of state.els){
     const dom = document.getElementById('el-'+el.id);
@@ -235,7 +255,7 @@ function render(){
   st.classList.toggle('round', state.mediaInfo.round);
   $('#stageOuter').style.width = W*state.zoom+'px';
   $('#stageOuter').style.height = H*state.zoom+'px';
-  $('#dims').textContent = `${W}×${H}px · ${(W/(300/25.4)).toFixed(0)}×${(H/(300/25.4)).toFixed(0)}mm`;
+  $('#dims').textContent = `${W}×${H}px · ${(W/state.pxPerMm).toFixed(0)}×${(H/state.pxPerMm).toFixed(0)}mm`;
   st.innerHTML='';
   for (const el of state.els) st.appendChild(domFor(el));
 }
@@ -438,11 +458,14 @@ function alignV(where){
 
 // ---- spec / preview / print -----------------------------------------
 function buildSpec(){
-  return { media:state.media,
+  return { printer:state.printer, media:state.media,
            length_mm: state.mediaInfo.kind==='continuous' && state.lenMode==='fixed' ? state.lenMm : null,
            margin:16, copies:state.copies,
            elements: state.els.map(({id,...e})=>e) };
 }
+
+function printerName(){ return (PRINTERS.find(p=>p.id===state.printer)||{}).name || state.printer; }
+function updatePrintBtn(){ $('#printBtn').textContent = 'Print → ' + printerName(); }
 
 async function doPreview(){
   try{
@@ -465,13 +488,18 @@ async function doPrint(){
     if(j.status==='ok') toast(`Printed ${j.copies}× to ${j.printer_ip}`);
     else toast('Print error: '+j.error, true);
   }catch(e){ toast('Print failed: '+e, true); }
-  $('#printBtn').disabled=false; $('#printBtn').textContent='Print';
+  $('#printBtn').disabled=false; updatePrintBtn();
 }
 
 // ---- bindings --------------------------------------------------------
 function bind(){
   document.querySelectorAll('[data-add]').forEach(b=>
     b.addEventListener('click',()=>addEl(b.dataset.add)));
+  $('#printer').addEventListener('change', async e=>{
+    await loadMedia(e.target.value);       // clean canvas per printer
+    state.els=[]; state.sel=null;
+    seedExample(); fitZoom(); updatePrintBtn();
+  });
   $('#media').addEventListener('change',e=>setMedia(e.target.value));
   $('#lenMode').addEventListener('change',e=>{ state.lenMode=e.target.value;
     $('#lenMm').style.display = state.lenMode==='fixed'?'':'none'; render(); });
@@ -484,9 +512,13 @@ function bind(){
   window.addEventListener('keydown',e=>{
     if((e.key==='Delete'||e.key==='Backspace') && state.sel!==null &&
        !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){ delSel(); }});
-  // fit zoom to width on load
+  fitZoom();   // fit zoom to width on load
+}
+
+function fitZoom(){
   const fit = Math.min(1, ($('#canvaswrap').clientWidth-60)/state.mediaInfo.width_px);
   state.zoom = Math.max(0.2, fit); $('#zoom').value = Math.round(state.zoom*100);
+  render(); markSel();
 }
 
 function seedExample(){
