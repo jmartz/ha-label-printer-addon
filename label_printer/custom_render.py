@@ -50,14 +50,20 @@ _KIND = {
 # ----------------------------------------------------------------------
 
 NIIMBOT_PX_PER_MM = 8.0            # Niimbot B1 = 203.2 dpi
+NIIMBOT_HEAD_PX = 384             # B1 print head is 384 dots wide (~48 mm),
+                                  # narrower than a 50 mm label -- anything past
+                                  # this in the across-head (width) direction is
+                                  # physically unprintable, so we cap the canvas
+                                  # width here to keep designs on the head.
 
-# width_px = across the print head, length_px = feed direction, both at 8 px/mm.
-# The 50x30 roll is the common default; the others cover the usual B1 rolls.
+# width_px = across the print head (capped at the 384-dot head), length_px = feed
+# direction. The 50x30 roll is the common default; others cover the usual rolls.
+# (50 mm labels expose 48 mm of printable width -- ~1 mm dead strip each edge.)
 _NIIMBOT_MEDIA = [
-    {"code": "b1_50x30",  "name": "50 x 30 mm", "kind": "die-cut", "width_px": 400, "length_px": 240, "round": False},
-    {"code": "b1_40x30",  "name": "40 x 30 mm", "kind": "die-cut", "width_px": 320, "length_px": 240, "round": False},
-    {"code": "b1_50x70",  "name": "50 x 70 mm", "kind": "die-cut", "width_px": 400, "length_px": 560, "round": False},
-    {"code": "b1_50x50r", "name": "50 mm round", "kind": "round",  "width_px": 400, "length_px": 400, "round": True},
+    {"code": "b1_50x30",  "name": "50 x 30 mm", "kind": "die-cut", "width_px": NIIMBOT_HEAD_PX, "length_px": 240, "round": False},
+    {"code": "b1_40x30",  "name": "40 x 30 mm", "kind": "die-cut", "width_px": 320,             "length_px": 240, "round": False},
+    {"code": "b1_50x70",  "name": "50 x 70 mm", "kind": "die-cut", "width_px": NIIMBOT_HEAD_PX, "length_px": 560, "round": False},
+    {"code": "b1_50x50r", "name": "50 mm round", "kind": "round",  "width_px": NIIMBOT_HEAD_PX, "length_px": NIIMBOT_HEAD_PX, "round": True},
 ]
 
 PRINTERS = {
