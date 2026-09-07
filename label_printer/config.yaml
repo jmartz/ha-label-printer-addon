@@ -3,7 +3,7 @@
 # Settings > Add-ons > Add-on Store > (three dots) > Check for updates / reload,
 # and "Breast Milk Label Printer" will appear under "Local add-ons".
 name: "Breast Milk Label Printer"
-version: "3.4.0"
+version: "3.4.1"
 slug: "label_printer"
 description: "Prints fridge labels (breast milk + leftovers) on demand AND a web-based custom-label designer (any media size, fonts, styles, special characters, QR/barcodes). Prints to a networked Brother QL-820NWB OR a Niimbot B1 (via the hass-niimbot integration) -- pick the printer in the designer and the label sizes follow."
 url: "https://github.com/jmartz/ha-label-printer-addon/tree/main/label_printer"
@@ -44,8 +44,10 @@ options:
   label: "62"
   niimbot_device_id: "18e876934ab0f9f57f0593b24044ae1b"
   niimbot_mac: "05:06:12:8A:E8:D0"
+  niimbot_health_entity: "sensor.niimbot_8ae8d0_battery"
 schema:
   printer_ip: str
   label: str
   niimbot_device_id: str?
   niimbot_mac: str?
+  niimbot_health_entity: str?

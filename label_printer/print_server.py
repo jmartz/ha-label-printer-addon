@@ -21,8 +21,9 @@ import socket
 import subprocess
 import time
 import urllib.request
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 from brother_ql.conversion import convert
@@ -51,6 +52,7 @@ CORE_API = "http://supervisor/core/api"
 NIIMBOT_SCAN_INTERVAL = 60      # seconds between polls
 NIIMBOT_LINE_WAIT_MS = 10       # ms pause between print lines
 NIIMBOT_CONFIRM_EVERY = 8       # confirm reception every N lines
+WATCHDOG_INTERVAL = 90          # seconds between orphaned-link checks
 
 # Where we remember a freshly-discovered IP between runs (HA add-on data dir).
 IP_CACHE = "/data/last_ip.txt"
@@ -359,6 +361,69 @@ def ble_disconnect(mac):
         return f"disconnect failed: {e}"
 
 
+def ble_connected(mac):
+    """True if BlueZ currently holds a link to `mac`."""
+    if not mac:
+        return False
+    try:
+        r = subprocess.run(["bluetoothctl", "info", mac],
+                           capture_output=True, text=True, timeout=15)
+        return "Connected: yes" in (r.stdout or "")
+    except Exception:
+        return False
+
+
+def _entity_age(entity_id):
+    """Seconds since an entity last updated (None if unknown)."""
+    try:
+        st = _core_req(f"/states/{entity_id}")
+        ts = (st or {}).get("last_updated")
+        if not ts:
+            return None
+        ts = ts.replace("Z", "+00:00")
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds()
+    except Exception:
+        return None
+
+
+def niimbot_diagnose():
+    """Is a stale BlueZ link holding the printer hostage?
+
+    Orphan signature = BlueZ says CONNECTED while the integration's polled data
+    has gone stale. A healthy link refreshes every scan_interval, so staleness
+    well past that means the connection exists but the integration can't use it.
+    Requiring BOTH avoids ever cutting a working link on a merely laggy sensor.
+    """
+    cfg = load_config()
+    mac = cfg.get("niimbot_mac")
+    ent = cfg.get("niimbot_health_entity") or "sensor.niimbot_8ae8d0_battery"
+    connected = ble_connected(mac)
+    age = _entity_age(ent)
+    stale_after = NIIMBOT_SCAN_INTERVAL * 2.5
+    orphan = bool(connected and age is not None and age > stale_after)
+    return {"mac": mac, "ble_connected": connected, "data_age_s": age,
+            "stale_after_s": stale_after, "orphaned": orphan}
+
+
+@app.get("/niimbot_diag")
+def niimbot_diag():
+    return jsonify(status="ok", **niimbot_diagnose())
+
+
+def _watchdog():
+    """Clear orphaned links proactively so the printer is ready before use."""
+    while True:
+        time.sleep(WATCHDOG_INTERVAL)
+        try:
+            d = niimbot_diagnose()
+            if d["orphaned"]:
+                res = ble_disconnect(d["mac"])
+                print(f"[watchdog] orphaned BLE link (data {d['data_age_s']:.0f}s "
+                      f"stale) cleared: {res}", flush=True)
+        except Exception as e:
+            print(f"[watchdog] {e}", flush=True)
+
+
 @app.post("/niimbot_unstick")
 def niimbot_unstick():
     """Manually clear a stale BLE link (dashboard button / troubleshooting)."""
@@ -556,4 +621,7 @@ def print_custom():
 
 
 if __name__ == "__main__":
+    # Proactively keep the Niimbot's single BLE slot free, so a button press
+    # prints immediately instead of paying for a failure + retry.
+    threading.Thread(target=_watchdog, daemon=True).start()
     app.run(host="0.0.0.0", port=8099)
