@@ -42,6 +42,14 @@ PRINT_PORT = 9100
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
 CORE_API = "http://supervisor/core/api"
 
+# Tuned hass-niimbot options. The stock defaults (600 / 50 / 1) make a 240-line
+# label take ~30 s; these cut it to ~6 s. Kept here because the options-flow
+# schema only reports factory defaults, so the keep-alive toggle has to re-assert
+# them on every write (see /niimbot_keepalive).
+NIIMBOT_SCAN_INTERVAL = 60      # seconds between polls
+NIIMBOT_LINE_WAIT_MS = 10       # ms pause between print lines
+NIIMBOT_CONFIRM_EVERY = 8       # confirm reception every N lines
+
 # Where we remember a freshly-discovered IP between runs (HA add-on data dir).
 IP_CACHE = "/data/last_ip.txt"
 
@@ -270,13 +278,18 @@ def niimbot_keepalive_set():
                        error="no SUPERVISOR_TOKEN (needs homeassistant_api)"), 503
     try:
         flow = _start_options_flow()
-        opts = _flow_current_options(flow)      # keep every other option as-is
-        opts["keep_connection"] = want
-        # the schema requires every field, so backfill anything it didn't give us
-        opts.setdefault("use_sound", True)
-        opts.setdefault("scan_interval", 60)
-        opts.setdefault("wait_between_each_print_line", 10)
-        opts.setdefault("confirm_every_nth_print_line", 8)
+        opts = _flow_current_options(flow)
+        # CAREFUL: that schema hands back the integration's FACTORY defaults
+        # (scan 600 / wait 50 / confirm 1), not the live settings -- submitting
+        # them would silently undo the print-speed tuning. So pin the tuned
+        # values explicitly; only keep_connection is actually being toggled.
+        opts.update({
+            "use_sound": True,
+            "scan_interval": NIIMBOT_SCAN_INTERVAL,
+            "wait_between_each_print_line": NIIMBOT_LINE_WAIT_MS,
+            "confirm_every_nth_print_line": NIIMBOT_CONFIRM_EVERY,
+            "keep_connection": want,
+        })
         res = _core_req(f"/config/config_entries/options/flow/{flow['flow_id']}",
                         "POST", opts)
     except Exception as e:

@@ -428,20 +428,35 @@ def build_niimbot_milk_label(now, oz=None):
         d.text((cx - (b[2] - b[0]) / 2 - b[0], ymid - (b[3] - b[1]) / 2 - b[1]),
                text, font=f, fill=BLACK)
 
-    # --- header: the "in" stamp + day/night ("sleepy milk") icon ---
+    # --- day-of-week strip, current day inverted (scan the fridge for oldest) ---
+    f_day = load_font(19)
+    active = (now.weekday() + 1) % 7            # Mon=0..Sun=6 -> Sunday-first
+    sx0, sx1, sy0, sy1 = 4, W - 4, 5, 33
+    cw = (sx1 - sx0) / 7
+    for i, lab in enumerate(WEEKDAY_LETTERS):
+        x0, x1 = sx0 + i * cw, sx0 + (i + 1) * cw
+        if i == active:
+            d.rectangle([x0, sy0, x1, sy1], fill=BLACK)
+        b = d.textbbox((0, 0), lab, font=f_day)
+        d.text(((x0 + x1) / 2 - (b[2] - b[0]) / 2 - b[0],
+                (sy0 + sy1) / 2 - (b[3] - b[1]) / 2 - b[1]),
+               lab, font=f_day, fill=(WHITE if i == active else BLACK))
+    d.line([4, sy1 + 1, W - 4, sy1 + 1], fill=BLACK, width=2)
+
+    # --- the "in" stamp + day/night ("sleepy milk") icon ---
     stamp = f"{now:%a, %b} {now.day} · {t(now)}"
     if oz is not None:
         stamp += f" · {oz:.1f}oz"
-    d.text((12, 9), stamp, font=fitted_font(stamp, 26, 15, W - 70), fill=BLACK)
-    (draw_sun if is_day else draw_moon)(d, W - 26, 24, 11, BLACK)
-    d.line([10, 44, W - 10, 44], fill=BLACK, width=2)
+    d.text((12, 40), stamp, font=fitted_font(stamp, 24, 14, W - 66), fill=BLACK)
+    (draw_sun if is_day else draw_moon)(d, W - 24, 52, 10, BLACK)
+    d.line([10, 68, W - 10, 68], fill=BLACK, width=2)
 
     # --- deadline matrix: rows = storage state, columns = milk / formula ---
     mcx, fcx = 182, 306
-    f_hdr, f_row, f_lbl = load_font(19), load_font(23), load_font(20)
-    center(mcx, 50, "MILK", f_hdr)
-    center(fcx, 50, "FORMULA", f_hdr)
-    d.line([10, 74, W - 10, 74], fill=BLACK, width=1)
+    f_hdr, f_row, f_lbl = load_font(17), load_font(23), load_font(19)
+    center(mcx, 72, "MILK", f_hdr)
+    center(fcx, 72, "FORMULA", f_hdr)
+    d.line([10, 94, W - 10, 94], fill=BLACK, width=1)
 
     fr_m, fr_f = now + timedelta(days=4), now + timedelta(hours=24)
     rows = [
@@ -449,21 +464,21 @@ def build_niimbot_milk_label(now, oz=None):
         ("FRIDGE", f"{md(fr_m)} {t(fr_m)}",      f"{md(fr_f)} {t(fr_f)}"),
         ("FROZEN", md(add_months(now, 6)),       "NO"),
     ]
-    y = 80
+    y = 98
     for i, (lab, milk, form) in enumerate(rows):
-        ymid = y + 17
+        ymid = y + 16
         lb = d.textbbox((0, 0), lab, font=f_lbl)
         d.text((12, ymid - (lb[3] - lb[1]) / 2 - lb[1]), lab, font=f_lbl, fill=BLACK)
         cell(mcx, ymid, milk)
         cell(fcx, ymid, form)
-        y += 38
+        y += 33
         if i < len(rows) - 1:
-            d.line([10, y - 6, W - 10, y - 6], fill=BLACK, width=1)
+            d.line([10, y - 4, W - 10, y - 4], fill=BLACK, width=1)
 
     # --- the one rule that isn't a storage clock ---
-    d.line([10, 196, W - 10, 196], fill=BLACK, width=2)
+    d.line([10, 199, W - 10, 199], fill=BLACK, width=2)
     note = "Once baby drinks: milk 2h · formula 1h"
-    d.text((12, 203), note, font=fitted_font(note, 18, 12, W - 24), fill=BLACK)
+    d.text((12, 206), note, font=fitted_font(note, 17, 12, W - 24), fill=BLACK)
 
     header_text = f"{now:%a, %b} {now.day} {fmt_time(now)}"
     return img, header_text
