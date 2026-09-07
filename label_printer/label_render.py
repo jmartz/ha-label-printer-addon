@@ -420,13 +420,13 @@ def build_niimbot_milk_label(now, oz=None):
         b = d.textbbox((0, 0), text, font=font)
         d.text((cx - (b[2] - b[0]) / 2 - b[0], y), text, font=font, fill=BLACK)
 
-    def cell(cx, ymid, text, maxw=122):
+    def cell(cx, ymid, text, maxw=122, ink=BLACK):
         """Centre a value in its column, shrinking it to fit (fridge needs a
         date AND a time, which is far wider than a bare clock time)."""
         f = fitted_font(text, 23, 12, maxw)
         b = d.textbbox((0, 0), text, font=f)
         d.text((cx - (b[2] - b[0]) / 2 - b[0], ymid - (b[3] - b[1]) / 2 - b[1]),
-               text, font=f, fill=BLACK)
+               text, font=f, fill=ink)
 
     # --- day-of-week strip, current day inverted (scan the fridge for oldest) ---
     f_day = load_font(19)
@@ -460,21 +460,28 @@ def build_niimbot_milk_label(now, oz=None):
     center(fcx, 72, "FORMULA", f_hdr)
     d.line([10, 94, W - 10, 94], fill=BLACK, width=1)
 
+    # Same nouns as the Brother label (Room / Fridge / Freezer) so the two
+    # labels read identically side by side in the fridge.
     fr_m, fr_f = now + timedelta(days=4), now + timedelta(hours=24)
     rows = [
-        ("OUT",    t(now + timedelta(hours=4)),  t(now + timedelta(hours=2))),
-        ("FRIDGE", f"{md(fr_m)} {t(fr_m)}",      f"{md(fr_f)} {t(fr_f)}"),
-        ("FROZEN", md(add_months(now, 6)),       "NO"),
+        ("ROOM",    t(now + timedelta(hours=4)), t(now + timedelta(hours=2))),
+        ("FRIDGE",  f"{md(fr_m)} {t(fr_m)}",     f"{md(fr_f)} {t(fr_f)}"),
+        ("FREEZER", md(add_months(now, 6)),      "NO"),
     ]
     y = 98
     for i, (lab, milk, form) in enumerate(rows):
-        ymid = y + 16
+        hero = lab == "FRIDGE"          # the common case: invert it, as the
+        ymid = y + 16                   # Brother label does, so it pops
+        if hero:
+            d.rectangle([8, y - 3, W - 9, y + 30], fill=BLACK)
+        ink = WHITE if hero else BLACK
         lb = d.textbbox((0, 0), lab, font=f_lbl)
-        d.text((12, ymid - (lb[3] - lb[1]) / 2 - lb[1]), lab, font=f_lbl, fill=BLACK)
-        cell(mcx, ymid, milk)
-        cell(fcx, ymid, form)
+        d.text((12, ymid - (lb[3] - lb[1]) / 2 - lb[1]), lab, font=f_lbl, fill=ink)
+        cell(mcx, ymid, milk, ink=ink)
+        cell(fcx, ymid, form, ink=ink)
         y += 33
-        if i < len(rows) - 1:
+        # the inverted band is its own separator, so skip rules touching it
+        if i < len(rows) - 1 and not hero and rows[i + 1][0] != "FRIDGE":
             d.line([10, y - 4, W - 10, y - 4], fill=BLACK, width=1)
 
     # --- the one rule that isn't a storage clock ---
