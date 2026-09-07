@@ -420,6 +420,14 @@ def build_niimbot_milk_label(now, oz=None):
         b = d.textbbox((0, 0), text, font=font)
         d.text((cx - (b[2] - b[0]) / 2 - b[0], y), text, font=font, fill=BLACK)
 
+    def cell(cx, ymid, text, maxw=122):
+        """Centre a value in its column, shrinking it to fit (fridge needs a
+        date AND a time, which is far wider than a bare clock time)."""
+        f = fitted_font(text, 23, 12, maxw)
+        b = d.textbbox((0, 0), text, font=f)
+        d.text((cx - (b[2] - b[0]) / 2 - b[0], ymid - (b[3] - b[1]) / 2 - b[1]),
+               text, font=f, fill=BLACK)
+
     # --- header: the "in" stamp + day/night ("sleepy milk") icon ---
     stamp = f"{now:%a, %b} {now.day} · {t(now)}"
     if oz is not None:
@@ -435,16 +443,19 @@ def build_niimbot_milk_label(now, oz=None):
     center(fcx, 50, "FORMULA", f_hdr)
     d.line([10, 74, W - 10, 74], fill=BLACK, width=1)
 
+    fr_m, fr_f = now + timedelta(days=4), now + timedelta(hours=24)
     rows = [
-        ("OUT",    t(now + timedelta(hours=4)), t(now + timedelta(hours=2))),
-        ("FRIDGE", md(now + timedelta(days=4)), md(now + timedelta(hours=24))),
-        ("FROZEN", md(add_months(now, 6)),      "NO"),
+        ("OUT",    t(now + timedelta(hours=4)),  t(now + timedelta(hours=2))),
+        ("FRIDGE", f"{md(fr_m)} {t(fr_m)}",      f"{md(fr_f)} {t(fr_f)}"),
+        ("FROZEN", md(add_months(now, 6)),       "NO"),
     ]
     y = 80
     for i, (lab, milk, form) in enumerate(rows):
-        d.text((12, y), lab, font=f_lbl, fill=BLACK)
-        center(mcx, y - 2, milk, f_row)
-        center(fcx, y - 2, form, f_row)
+        ymid = y + 17
+        lb = d.textbbox((0, 0), lab, font=f_lbl)
+        d.text((12, ymid - (lb[3] - lb[1]) / 2 - lb[1]), lab, font=f_lbl, fill=BLACK)
+        cell(mcx, ymid, milk)
+        cell(fcx, ymid, form)
         y += 38
         if i < len(rows) - 1:
             d.line([10, y - 6, W - 10, y - 6], fill=BLACK, width=1)

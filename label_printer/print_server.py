@@ -182,6 +182,73 @@ def health():
     return jsonify(status="ok")
 
 
+# ----------------------------------------------------------------------
+# Niimbot "keep BLE connection" toggle
+# ----------------------------------------------------------------------
+# keep_connection is a config-ENTRY OPTION of the hass-niimbot integration, not
+# an entity, so there's no switch to put on a dashboard. This drives the
+# integration's options flow through the Supervisor's Core-API proxy, which
+# gives Home Assistant a real toggle (input_boolean -> automation -> here).
+
+def _core_req(path, method="GET", body=None, timeout=25):
+    req = urllib.request.Request(
+        f"{CORE_API}{path}",
+        data=json.dumps(body).encode() if body is not None else None,
+        method=method,
+        headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}",
+                 "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    return json.loads(raw) if raw else None
+
+
+def _niimbot_entry():
+    for e in _core_req("/config/config_entries/entry") or []:
+        if e.get("domain") == "niimbot":
+            return e
+    raise RuntimeError("niimbot config entry not found")
+
+
+@app.get("/niimbot_keepalive")
+def niimbot_keepalive_get():
+    try:
+        opts = _niimbot_entry().get("options") or {}
+    except Exception as e:
+        return jsonify(status="error", error=str(e)), 502
+    return jsonify(status="ok", keep_connection=bool(opts.get("keep_connection")))
+
+
+@app.post("/niimbot_keepalive")
+def niimbot_keepalive_set():
+    """Turn the integration's Keep-BLE-Connection option on/off (?enable=1|0).
+
+    'enable' (not 'on') because YAML would coerce on/off into booleans.
+    """
+    want = str(request.values.get("enable", "1")).strip().lower() in (
+        "1", "true", "on", "yes")
+    if not SUPERVISOR_TOKEN:
+        return jsonify(status="error",
+                       error="no SUPERVISOR_TOKEN (needs homeassistant_api)"), 503
+    try:
+        entry = _niimbot_entry()
+        flow = _core_req("/config/config_entries/options/flow", "POST",
+                         {"handler": entry["entry_id"]})
+        opts = dict(entry.get("options") or {})
+        opts["keep_connection"] = want
+        # the options schema requires every field, so backfill any missing ones
+        opts.setdefault("use_sound", True)
+        opts.setdefault("scan_interval", 60)
+        opts.setdefault("wait_between_each_print_line", 10)
+        opts.setdefault("confirm_every_nth_print_line", 8)
+        res = _core_req(f"/config/config_entries/options/flow/{flow['flow_id']}",
+                        "POST", opts)
+    except Exception as e:
+        return jsonify(status="error", error=str(e)), 502
+    print(f"Niimbot keep_connection -> {want}", flush=True)
+    return jsonify(status="ok", keep_connection=want,
+                   flow=(res or {}).get("type"))
+
+
 def _parse_oz():
     """Read an optional `oz` amount from the query string, form, or JSON body.
 
