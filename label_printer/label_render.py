@@ -381,3 +381,53 @@ def build_label_image(now, oz=None):
 
     header_text = f"{date_str} {time_str}"
     return img, header_text
+
+
+# ----------------------------------------------------------------------
+# Compact breast-milk label for the Niimbot B1 (384x240 px = 48x30mm @ 8px/mm)
+# ----------------------------------------------------------------------
+# The B1's little die-cut label can't hold the full fridge matrix, so this is a
+# focused milk label: expressed date/time (with a day/night "sleepy" icon) + the
+# fridge use-by (the common case, shown big) and the freezer date. Optional oz.
+
+NIIMBOT_W, NIIMBOT_H = 384, 240
+
+def build_niimbot_milk_label(now, oz=None):
+    W, H = NIIMBOT_W, NIIMBOT_H
+    left, right = 16, W - 16
+    fridge = now + timedelta(days=4)
+    fz_milk = add_months(now, 6)
+    is_day = DAY_START <= now.hour < DAY_END
+
+    img = Image.new("RGB", (W, H), WHITE)
+    d = ImageDraw.Draw(img)
+    d.rectangle([2, 2, W - 3, H - 3], outline=BLACK, width=2)
+
+    # Header + day/night icon (top-right)
+    f_hdr = load_font(32)
+    d.text((left, 10), "BREAST MILK", font=f_hdr, fill=BLACK)
+    ICON_R = 12
+    (draw_sun if is_day else draw_moon)(d, right - ICON_R - 6, 26, ICON_R, BLACK)
+
+    # Expressed date + time (+ oz if the knob was turned)
+    dt_str = f"{now:%a, %b} {now.day} · {fmt_time(now)}"
+    if oz is not None:
+        dt_str += f"  ({oz:.1f} oz)"
+    f_dt = fitted_font(dt_str, 30, 18, right - left)
+    d.text((left, 58), dt_str, font=f_dt, fill=BLACK)
+
+    d.line([left, 102, right, 102], fill=BLACK, width=2)
+
+    # Fridge use-by -- the hero line
+    d.text((left, 112), "FRIDGE · use by (4 days)", font=load_font(21), fill=BLACK)
+    fridge_str = f"{fridge:%a, %b} {fridge.day}"
+    d.text((left, 140), fridge_str, font=fitted_font(fridge_str, 40, 26, right - left), fill=BLACK)
+
+    # Freezer -- secondary (compact year only on rollover)
+    fz_str = f"Freezer 6 mo: {fz_milk:%b} {fz_milk.day}"
+    if fz_milk.year != now.year:
+        fz_str += f" '{fz_milk.year % 100:02d}"
+    d.text((left, 198), fz_str, font=load_font(21), fill=BLACK)
+
+    header_text = f"{now:%a, %b} {now.day} {fmt_time(now)}"
+    return img, header_text

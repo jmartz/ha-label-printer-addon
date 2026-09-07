@@ -27,7 +27,7 @@ from brother_ql.conversion import convert
 from brother_ql.backends.helpers import send
 from brother_ql.raster import BrotherQLRaster
 
-from label_render import build_label_image
+from label_render import build_label_image, build_niimbot_milk_label
 import custom_render
 
 MODEL = "QL-820NWB"
@@ -268,20 +268,26 @@ def print_niimbot(img, spec):
 
 @app.post("/print")
 def do_print():
-    cfg = load_config()
     now = datetime.now()
     oz = _parse_oz()
-    img, header_text = build_label_image(now, oz)
+    # ?printer=niimbot prints the compact B1 milk label via HA's niimbot.print;
+    # default (Brother) prints the full 62mm fridge label as before.
+    printer = request.values.get("printer", "brother")
     try:
-        ip = print_image(img, cfg["label"])
+        if printer == "niimbot":
+            img, header_text = build_niimbot_milk_label(now, oz)
+            dest = print_niimbot(img, {"density": 3})
+        else:
+            img, header_text = build_label_image(now, oz)
+            dest = print_image(img, load_config()["label"])
     except RuntimeError as e:
         return jsonify(status="error", error=str(e)), 503
     except Exception as e:
         return jsonify(status="error", error=str(e)), 502
 
     print(f"Printed '{header_text}'{f' ({oz:.1f} oz)' if oz is not None else ''} "
-          f"to {ip}", flush=True)
-    return jsonify(status="ok", printed=header_text, oz=oz, printer_ip=ip)
+          f"to {dest} [{printer}]", flush=True)
+    return jsonify(status="ok", printed=header_text, oz=oz, printer=printer, printer_ip=dest)
 
 
 # ----------------------------------------------------------------------
