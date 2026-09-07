@@ -55,6 +55,19 @@ NIIMBOT_CONFIRM_EVERY = 8       # confirm reception every N lines
 WATCHDOG_INTERVAL = 90          # seconds between orphaned-link checks
 WATCHDOG_STREAK = 2             # consecutive positives before acting (hysteresis)
 
+# Deferred printing. The B1 stops advertising when idle and Home Assistant
+# cannot wake it -- that needs a physical tap. Without this, pressing the button
+# while the printer is asleep fails within seconds and the label is silently
+# lost, which is exactly when you least want to lose it. So a failed Niimbot
+# print is PARKED instead of dropped, and reprinted the moment the printer comes
+# back. Press the button, walk over, tap the printer, and it prints.
+#
+# One slot, not a queue: a second press replaces the first, because two
+# identical milk labels is a papercut and a growing backlog spitting out five
+# labels at once is worse.
+NIIMBOT_PENDING_TTL = 1800      # drop a parked label after 30 min unprinted
+NIIMBOT_PENDING_POLL = 10       # seconds between "is it back yet?" checks
+
 # Where we remember a freshly-discovered IP between runs (HA add-on data dir).
 IP_CACHE = "/data/last_ip.txt"
 
@@ -437,6 +450,103 @@ def _watchdog():
             print(f"[watchdog] {e}", flush=True)
 
 
+# ----------------------------------------------------------------------
+# Deferred ("parked") Niimbot print -- see NIIMBOT_PENDING_TTL above
+# ----------------------------------------------------------------------
+
+_pending_lock = threading.Lock()
+_pending = None          # {"img", "spec", "text", "oz", "created", "attempts"}
+
+
+def _park_pending(img, spec, text, oz):
+    """Hold a label that couldn't print, replacing any previous one."""
+    global _pending
+    with _pending_lock:
+        replaced = _pending["text"] if _pending else None
+        _pending = {"img": img, "spec": spec, "text": text, "oz": oz,
+                    "created": time.time(), "attempts": 1}
+    if replaced:
+        print(f"[pending] replaced parked label '{replaced}' with '{text}'", flush=True)
+    else:
+        print(f"[pending] parked '{text}' -- will print when the B1 reconnects "
+              f"(expires in {NIIMBOT_PENDING_TTL // 60} min)", flush=True)
+
+
+def _pending_snapshot():
+    with _pending_lock:
+        if not _pending:
+            return None
+        return {"text": _pending["text"], "oz": _pending["oz"],
+                "age_s": int(time.time() - _pending["created"]),
+                "attempts": _pending["attempts"]}
+
+
+def _pending_flusher():
+    """Reprint a parked label as soon as the printer is actually reachable.
+
+    Gated on the hass-niimbot connection entity rather than just retrying
+    blindly: an unreachable B1 fails fast, so a blind retry loop would just
+    churn the log and the BLE stack every few seconds for half an hour.
+    """
+    global _pending
+    while True:
+        time.sleep(NIIMBOT_PENDING_POLL)
+        try:
+            snap = _pending_snapshot()
+            if not snap:
+                continue
+
+            if snap["age_s"] > NIIMBOT_PENDING_TTL:
+                with _pending_lock:
+                    _pending = None
+                print(f"[pending] dropped '{snap['text']}' unprinted after "
+                      f"{snap['age_s']}s -- printer never came back", flush=True)
+                continue
+
+            cfg = load_config()
+            ent = (cfg.get("niimbot_conn_entity")
+                   or "binary_sensor.niimbot_8ae8d0_connection")
+            if _entity_state(ent) != "on":
+                continue
+
+            with _pending_lock:
+                job = _pending
+            if not job:
+                continue
+            print_niimbot(job["img"], job["spec"])
+            with _pending_lock:
+                # Only clear if it's still the same job (a newer press wins).
+                if _pending is job:
+                    _pending = None
+            print(f"[pending] printed '{job['text']}' after waiting "
+                  f"{snap['age_s']}s", flush=True)
+        except Exception as e:
+            with _pending_lock:
+                if _pending:
+                    _pending["attempts"] += 1
+            print(f"[pending] retry failed: {e}", flush=True)
+
+
+@app.get("/niimbot_pending")
+def niimbot_pending():
+    """Is a label waiting for the printer to wake up?"""
+    snap = _pending_snapshot()
+    return jsonify(status="ok", pending=bool(snap), ttl_s=NIIMBOT_PENDING_TTL,
+                   **(snap or {}))
+
+
+@app.post("/niimbot_pending_clear")
+def niimbot_pending_clear():
+    """Bin a parked label (dashboard button) -- e.g. it's no longer wanted."""
+    global _pending
+    snap = _pending_snapshot()
+    with _pending_lock:
+        _pending = None
+    if snap:
+        print(f"[pending] cleared '{snap['text']}' by request", flush=True)
+    return jsonify(status="ok", cleared=bool(snap), **(snap or {}))
+
+
 @app.post("/niimbot_unstick")
 def niimbot_unstick():
     """Manually clear a stale BLE link (dashboard button / troubleshooting)."""
@@ -515,7 +625,19 @@ def do_print():
     try:
         if printer == "niimbot":
             img, header_text = build_niimbot_milk_label(now, oz)
-            dest = print_niimbot(img, {"density": 3})
+            spec = {"density": 3}
+            try:
+                dest = print_niimbot(img, spec)
+            except RuntimeError:
+                raise            # misconfiguration -- parking would never succeed
+            except Exception as e:
+                # Printer asleep or out of range. Keep the label (rendered NOW,
+                # so it carries the time you actually pressed the button) and
+                # print it when the B1 comes back.
+                _park_pending(img, spec, header_text, oz)
+                return jsonify(status="pending", printed=header_text, oz=oz,
+                               printer=printer, reason=str(e),
+                               ttl_s=NIIMBOT_PENDING_TTL), 202
         else:
             img, header_text = build_label_image(now, oz)
             dest = print_image(img, load_config()["label"])
@@ -637,4 +759,6 @@ if __name__ == "__main__":
     # Proactively keep the Niimbot's single BLE slot free, so a button press
     # prints immediately instead of paying for a failure + retry.
     threading.Thread(target=_watchdog, daemon=True).start()
+    # Reprint any label that was parked because the B1 was asleep.
+    threading.Thread(target=_pending_flusher, daemon=True).start()
     app.run(host="0.0.0.0", port=8099)
