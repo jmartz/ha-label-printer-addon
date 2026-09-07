@@ -209,13 +209,52 @@ def _niimbot_entry():
     raise RuntimeError("niimbot config entry not found")
 
 
+def _flow_current_options(flow):
+    """Current option values, read out of the options-flow's schema.
+
+    HA's /config/config_entries API deliberately does NOT return an entry's
+    options, but starting the options flow hands back a schema whose defaults /
+    suggested values ARE the current settings -- so we read them from there and
+    resubmit them untouched, which is what keeps a toggle from clobbering the
+    other options.
+    """
+    out = {}
+    for fld in (flow or {}).get("data_schema") or []:
+        name = fld.get("name")
+        if not name:
+            continue
+        if "default" in fld:
+            out[name] = fld["default"]
+        elif isinstance(fld.get("description"), dict) and \
+                "suggested_value" in fld["description"]:
+            out[name] = fld["description"]["suggested_value"]
+    return out
+
+
+def _start_options_flow():
+    entry = _niimbot_entry()
+    flow = _core_req("/config/config_entries/options/flow", "POST",
+                     {"handler": entry["entry_id"]})
+    return flow
+
+
 @app.get("/niimbot_keepalive")
 def niimbot_keepalive_get():
+    """Read the live keep_connection value (opens a flow, reads it, closes it)."""
+    if not SUPERVISOR_TOKEN:
+        return jsonify(status="error", error="no SUPERVISOR_TOKEN"), 503
     try:
-        opts = _niimbot_entry().get("options") or {}
+        flow = _start_options_flow()
+        cur = _flow_current_options(flow)
+        try:                                   # don't leave the flow dangling
+            _core_req(f"/config/config_entries/options/flow/{flow['flow_id']}",
+                      "DELETE")
+        except Exception:
+            pass
     except Exception as e:
         return jsonify(status="error", error=str(e)), 502
-    return jsonify(status="ok", keep_connection=bool(opts.get("keep_connection")))
+    return jsonify(status="ok", keep_connection=bool(cur.get("keep_connection")),
+                   options=cur)
 
 
 @app.post("/niimbot_keepalive")
@@ -230,12 +269,10 @@ def niimbot_keepalive_set():
         return jsonify(status="error",
                        error="no SUPERVISOR_TOKEN (needs homeassistant_api)"), 503
     try:
-        entry = _niimbot_entry()
-        flow = _core_req("/config/config_entries/options/flow", "POST",
-                         {"handler": entry["entry_id"]})
-        opts = dict(entry.get("options") or {})
+        flow = _start_options_flow()
+        opts = _flow_current_options(flow)      # keep every other option as-is
         opts["keep_connection"] = want
-        # the options schema requires every field, so backfill any missing ones
+        # the schema requires every field, so backfill anything it didn't give us
         opts.setdefault("use_sound", True)
         opts.setdefault("scan_interval", 60)
         opts.setdefault("wait_between_each_print_line", 10)
