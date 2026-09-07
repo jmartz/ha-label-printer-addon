@@ -3,7 +3,7 @@
 # Settings > Add-ons > Add-on Store > (three dots) > Check for updates / reload,
 # and "Breast Milk Label Printer" will appear under "Local add-ons".
 name: "Breast Milk Label Printer"
-version: "3.3.7"
+version: "3.4.0"
 slug: "label_printer"
 description: "Prints fridge labels (breast milk + leftovers) on demand AND a web-based custom-label designer (any media size, fonts, styles, special characters, QR/barcodes). Prints to a networked Brother QL-820NWB OR a Niimbot B1 (via the hass-niimbot integration) -- pick the printer in the designer and the label sizes follow."
 url: "https://github.com/jmartz/ha-label-printer-addon/tree/main/label_printer"
@@ -28,6 +28,11 @@ panel_title: "Label Designer"
 # the add-on can't reach directly. homeassistant_api grants a SUPERVISOR_TOKEN
 # so the add-on can call the `niimbot.print` service through the Core API proxy.
 homeassistant_api: true
+# host_dbus lets the add-on reach BlueZ so it can drop an orphaned BLE link.
+# The Niimbot allows exactly ONE connection, and a stale link left behind by an
+# integration reload silently locks Home Assistant out ("BLE device not
+# available") -- the add-on now clears it and retries automatically.
+host_dbus: true
 # Keep the direct port open too: the M5Dial and the HA rest_command POST
 # straight to 192.168.10.35:8099/print, bypassing ingress.
 ports:
@@ -38,7 +43,9 @@ options:
   printer_ip: "192.168.10.120"
   label: "62"
   niimbot_device_id: "18e876934ab0f9f57f0593b24044ae1b"
+  niimbot_mac: "05:06:12:8A:E8:D0"
 schema:
   printer_ip: str
   label: str
   niimbot_device_id: str?
+  niimbot_mac: str?

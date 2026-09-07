@@ -18,6 +18,8 @@ import json
 import os
 import re
 import socket
+import subprocess
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -336,7 +338,37 @@ def print_image(img, label_code):
     return ip
 
 
-def print_niimbot(img, spec):
+def ble_disconnect(mac):
+    """Drop an orphaned BlueZ link to the printer.
+
+    The B1 accepts exactly ONE BLE connection. When the hass-niimbot
+    integration reloads (options change, Core restart, add-on update) the old
+    connection can survive at the BlueZ level and keep holding that slot, so the
+    new instance can never connect and every print fails instantly with "BLE
+    device not available" -- while the printer sits there showing a solid blue
+    (connected) LED. Disconnecting the orphan frees it immediately.
+    """
+    if not mac:
+        return "no mac configured"
+    try:
+        r = subprocess.run(["bluetoothctl", "disconnect", mac],
+                           capture_output=True, text=True, timeout=20)
+        out = (r.stdout or "").strip().splitlines()
+        return out[-1] if out else f"rc={r.returncode}"
+    except Exception as e:                      # bluez missing / no dbus access
+        return f"disconnect failed: {e}"
+
+
+@app.post("/niimbot_unstick")
+def niimbot_unstick():
+    """Manually clear a stale BLE link (dashboard button / troubleshooting)."""
+    mac = load_config().get("niimbot_mac")
+    res = ble_disconnect(mac)
+    print(f"Unstick {mac}: {res}", flush=True)
+    return jsonify(status="ok", mac=mac, result=res)
+
+
+def print_niimbot(img, spec, _retry=True):
     """Print a PIL image on the Niimbot B1 via HA's niimbot.print service.
 
     The whole rendered label is sent as ONE full-canvas `dlimg` element (a
@@ -378,8 +410,20 @@ def print_niimbot(img, spec):
     )
     # BLE connect + print can take several seconds; the service call blocks until
     # the print finishes, so allow a generous timeout.
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            resp.read()
+    except Exception as e:
+        if not _retry:
+            raise
+        # Almost always an orphaned BlueZ link holding the printer's only
+        # connection slot: clear it and try once more, so this self-heals
+        # instead of needing a human with an SSH session.
+        res = ble_disconnect(cfg.get("niimbot_mac"))
+        print(f"Print failed ({e}); cleared stale BLE link: {res}; retrying",
+              flush=True)
+        time.sleep(3)
+        return print_niimbot(img, spec, _retry=False)
     return f"Niimbot B1 ({device_id[:8]}…)"
 
 
