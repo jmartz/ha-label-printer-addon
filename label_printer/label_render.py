@@ -453,8 +453,10 @@ def build_niimbot_milk_label(now, oz=None):
 
     # --- deadline matrix: rows = storage state, columns = milk / formula ---
     mcx, fcx = 182, 306
-    f_hdr, f_row, f_lbl = load_font(17), load_font(23), load_font(19)
-    center(mcx, 72, "MILK", f_hdr)
+    # size the header off the longest label so both columns match
+    f_hdr = fitted_font("BREAST MILK", 17, 11, 124)
+    f_row, f_lbl = load_font(23), load_font(19)
+    center(mcx, 72, "BREAST MILK", f_hdr)
     center(fcx, 72, "FORMULA", f_hdr)
     d.line([10, 94, W - 10, 94], fill=BLACK, width=1)
 
