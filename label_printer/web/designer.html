@@ -143,8 +143,11 @@ const $ = s => document.querySelector(s);
 const isMobile = () => window.matchMedia('(max-width:900px)').matches;
 let MEDIA = [], FONTS = [], PRINTERS = [];
 const DEFAULT_MEDIA = { brother:'62', niimbot:'b1_50x30' };
+// Default to a FIXED 40mm length rather than auto-fit: on continuous tape
+// auto-fit with one seeded element opens as a thin sliver that looks nothing
+// like a real label (the breast-milk label is ~59 x 37 mm).
 const state = { printer:'brother', pxPerMm:300/25.4,
-                media:'62', mediaInfo:null, lenMode:'auto', lenMm:90, zoom:1,
+                media:'62', mediaInfo:null, lenMode:'fixed', lenMm:40, zoom:1,
                 copies:1, els:[], sel:null, seq:1 };
 let pendingImg = null;
 
@@ -512,6 +515,11 @@ function bind(){
   window.addEventListener('keydown',e=>{
     if((e.key==='Delete'||e.key==='Backspace') && state.sel!==null &&
        !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){ delSel(); }});
+  // reflect the starting length mode in the UI (defaults to a fixed 40mm so the
+  // canvas opens looking like a real label, not an auto-fit sliver)
+  $('#lenMode').value = state.lenMode;
+  $('#lenMm').value = state.lenMm;
+  $('#lenMm').style.display = state.lenMode === 'fixed' ? '' : 'none';
   fitZoom();   // fit zoom to width on load
 }
 
