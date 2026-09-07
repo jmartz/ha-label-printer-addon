@@ -53,6 +53,7 @@ NIIMBOT_SCAN_INTERVAL = 60      # seconds between polls
 NIIMBOT_LINE_WAIT_MS = 10       # ms pause between print lines
 NIIMBOT_CONFIRM_EVERY = 8       # confirm reception every N lines
 WATCHDOG_INTERVAL = 90          # seconds between orphaned-link checks
+WATCHDOG_STREAK = 2             # consecutive positives before acting (hysteresis)
 
 # Where we remember a freshly-discovered IP between runs (HA add-on data dir).
 IP_CACHE = "/data/last_ip.txt"
@@ -373,15 +374,10 @@ def ble_connected(mac):
         return False
 
 
-def _entity_age(entity_id):
-    """Seconds since an entity last updated (None if unknown)."""
+def _entity_state(entity_id):
+    """Current state string of an entity (None if unavailable)."""
     try:
-        st = _core_req(f"/states/{entity_id}")
-        ts = (st or {}).get("last_updated")
-        if not ts:
-            return None
-        ts = ts.replace("Z", "+00:00")
-        return (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds()
+        return (_core_req(f"/states/{entity_id}") or {}).get("state")
     except Exception:
         return None
 
@@ -389,20 +385,23 @@ def _entity_age(entity_id):
 def niimbot_diagnose():
     """Is a stale BlueZ link holding the printer hostage?
 
-    Orphan signature = BlueZ says CONNECTED while the integration's polled data
-    has gone stale. A healthy link refreshes every scan_interval, so staleness
-    well past that means the connection exists but the integration can't use it.
-    Requiring BOTH avoids ever cutting a working link on a merely laggy sensor.
+    Orphan signature = BlueZ reports a CONNECTED link while the hass-niimbot
+    integration reports NOT connected. That is precisely "a link exists that the
+    integration isn't using", which is what an orphan is.
+
+    (An earlier version compared the battery sensor's `last_updated` age instead.
+    That was wrong: `last_updated` only moves when the *value* changes, so a
+    steady battery reading looked permanently stale and the watchdog cut healthy
+    links every 90 s. `last_reported` would work but isn't exposed here.)
     """
     cfg = load_config()
     mac = cfg.get("niimbot_mac")
-    ent = cfg.get("niimbot_health_entity") or "sensor.niimbot_8ae8d0_battery"
+    ent = cfg.get("niimbot_conn_entity") or "binary_sensor.niimbot_8ae8d0_connection"
     connected = ble_connected(mac)
-    age = _entity_age(ent)
-    stale_after = NIIMBOT_SCAN_INTERVAL * 2.5
-    orphan = bool(connected and age is not None and age > stale_after)
-    return {"mac": mac, "ble_connected": connected, "data_age_s": age,
-            "stale_after_s": stale_after, "orphaned": orphan}
+    ha_conn = _entity_state(ent)
+    orphan = bool(connected and ha_conn == "off")
+    return {"mac": mac, "ble_connected": connected, "ha_connected": ha_conn,
+            "conn_entity": ent, "orphaned": orphan}
 
 
 @app.get("/niimbot_diag")
@@ -411,15 +410,29 @@ def niimbot_diag():
 
 
 def _watchdog():
-    """Clear orphaned links proactively so the printer is ready before use."""
+    """Clear orphaned links proactively so the printer is ready before use.
+
+    Requires the orphan condition on WATCHDOG_STREAK consecutive checks before
+    acting, so a momentary blip in the connection sensor can never cause us to
+    cut a healthy link (that mistake caused constant connect/disconnect churn).
+    """
+    streak = 0
     while True:
         time.sleep(WATCHDOG_INTERVAL)
         try:
             d = niimbot_diagnose()
-            if d["orphaned"]:
-                res = ble_disconnect(d["mac"])
-                print(f"[watchdog] orphaned BLE link (data {d['data_age_s']:.0f}s "
-                      f"stale) cleared: {res}", flush=True)
+            if not d["orphaned"]:
+                streak = 0
+                continue
+            streak += 1
+            if streak < WATCHDOG_STREAK:
+                print(f"[watchdog] possible orphan ({streak}/{WATCHDOG_STREAK}) "
+                      f"- ble={d['ble_connected']} ha={d['ha_connected']}", flush=True)
+                continue
+            res = ble_disconnect(d["mac"])
+            print(f"[watchdog] orphaned BLE link cleared (ble=connected, "
+                  f"ha={d['ha_connected']}): {res}", flush=True)
+            streak = 0
         except Exception as e:
             print(f"[watchdog] {e}", flush=True)
 
