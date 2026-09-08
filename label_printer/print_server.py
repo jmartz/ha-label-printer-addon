@@ -387,6 +387,164 @@ def ble_connected(mac):
         return False
 
 
+# ----------------------------------------------------------------------
+# Experimental raw BLE -- auto-shutdown write + fast-heartbeat keep-awake
+# ----------------------------------------------------------------------
+# The B1's auto-power-off is a firmware setting the hass-niimbot integration can
+# READ (GET_INFO key 7) but not WRITE. The Niimbot V4 protocol documents opcode
+# 0x27 (SetAutoShutdownTime, value 1-4; on some models 4 = "never") and a 0xDC
+# heartbeat meant to be sent every ~2s as a keep-alive. Both need raw GATT access
+# to the printer's single BLE slot, so the caller MUST first free it -- disable
+# the hass-niimbot integration -- or bleak can't connect. Framing/UUIDs are taken
+# verbatim from the integration's own niimprint (packet.py, printer.py).
+NIIMBOT_CHAR = "bef8d6c9-9c21-4c9e-b632-bd58c1009f9f"   # write + notify
+_keepawake = {"running": False}
+
+
+def _nb_pkt(cmd, data):
+    """NiimbotPacket: 0x55 0x55 cmd len *data checksum 0xAA 0xAA."""
+    chk = cmd ^ len(data)
+    for b in data:
+        chk ^= b
+    return bytes((0x55, 0x55, cmd, len(data), *data, chk, 0xAA, 0xAA))
+
+
+def _nb_parse(raw):
+    """(type, list(data)) from a response frame, else None."""
+    if len(raw) >= 7 and raw[0] == 0x55 and raw[1] == 0x55 and raw[-2:] == b"\xaa\xaa":
+        return raw[2], list(raw[4:4 + raw[3]])
+    return None
+
+
+async def _nb_autoshutdown(mac, set_value):
+    """GET_INFO(7) -> [optional SET 0x27 <val>] -> GET_INFO(7). Returns raw hex
+    of every notification plus the parsed before/after value."""
+    import asyncio
+    from bleak import BleakClient
+    got = []
+    out = {"before": None, "after": None, "steps": []}
+
+    def _nh(_, d):
+        got.append(bytes(d))
+
+    async def _q(label, pkt, wait=1.5):
+        got.clear()
+        await c.write_gatt_char(NIIMBOT_CHAR, pkt, response=True)
+        await asyncio.sleep(wait)
+        frames = [g.hex() for g in got]
+        parsed = [p for p in (_nb_parse(g) for g in got) if p]
+        out["steps"].append({label: frames})
+        return parsed
+
+    async with BleakClient(mac, timeout=25) as c:
+        await c.start_notify(NIIMBOT_CHAR, _nh)
+        p = await _q("get_before", _nb_pkt(0x40, b"\x07"))
+        # the GET_INFO(7) reply carries the current value in its data field
+        for _t, d in p:
+            if d:
+                out["before"] = d[0] if len(d) == 1 else d
+        if set_value is not None:
+            await _q("set_0x27", _nb_pkt(0x27, bytes([set_value])))
+            p = await _q("get_after", _nb_pkt(0x40, b"\x07"))
+            for _t, d in p:
+                if d:
+                    out["after"] = d[0] if len(d) == 1 else d
+        await c.stop_notify(NIIMBOT_CHAR)
+    return out
+
+
+def _nb_keepawake_worker(mac, duration, interval):
+    """Hold the BLE link and heartbeat every `interval`s for up to `duration`s.
+    If the printer sleeps, the link drops and we record when -- so a full-duration
+    hold past the normal auto-off proves fast heartbeat resets the idle timer."""
+    import asyncio
+    from bleak import BleakClient
+
+    async def run():
+        hb = _nb_pkt(0xDC, b"\x01")
+        st = _keepawake
+        st.update({"running": True, "beats": 0, "notifications": 0,
+                   "start": time.time(), "held_s": 0, "dropped_at_s": None,
+                   "error": None})
+
+        def _nh(_, d):
+            st["notifications"] += 1
+
+        try:
+            async with BleakClient(mac, timeout=25) as c:
+                await c.start_notify(NIIMBOT_CHAR, _nh)
+                end = time.time() + duration
+                while time.time() < end and _keepawake.get("running"):
+                    if not c.is_connected:
+                        st["dropped_at_s"] = round(time.time() - st["start"])
+                        break
+                    try:
+                        await c.write_gatt_char(NIIMBOT_CHAR, hb, response=True)
+                        st["beats"] += 1
+                    except Exception as e:
+                        st["dropped_at_s"] = round(time.time() - st["start"])
+                        st["error"] = f"write failed: {e}"
+                        break
+                    st["held_s"] = round(time.time() - st["start"])
+                    await asyncio.sleep(interval)
+        except Exception as e:
+            st["error"] = str(e)
+        finally:
+            st["held_s"] = round(time.time() - st["start"])
+            st["running"] = False
+
+    asyncio.run(run())
+
+
+@app.post("/niimbot_autoshutdown")
+def niimbot_autoshutdown():
+    """Read (and optionally set) the B1's auto-shutdown parameter over raw BLE.
+    ?set=1..4 writes opcode 0x27 (4 may mean 'never'). The hass-niimbot
+    integration MUST be disabled first, or the single BLE slot is taken."""
+    import asyncio
+    mac = load_config().get("niimbot_mac")
+    if not mac:
+        return jsonify(status="error", error="no niimbot_mac"), 400
+    sv = request.values.get("set")
+    set_value = int(sv) if sv not in (None, "") else None
+    if set_value is not None and set_value not in (1, 2, 3, 4):
+        return jsonify(status="error", error="set must be 1-4"), 400
+    try:
+        res = asyncio.run(_nb_autoshutdown(mac, set_value))
+        return jsonify(status="ok", mac=mac, set_requested=set_value, **res)
+    except Exception as e:
+        return jsonify(status="error", error=str(e)), 502
+
+
+@app.post("/niimbot_keepawake")
+def niimbot_keepawake():
+    """Start a background fast-heartbeat hold. ?duration=2700&interval=2.
+    Integration must be disabled first. Poll /niimbot_keepawake for status."""
+    if _keepawake.get("running"):
+        return jsonify(status="ok", already_running=True, **_keepawake)
+    mac = load_config().get("niimbot_mac")
+    if not mac:
+        return jsonify(status="error", error="no niimbot_mac"), 400
+    duration = int(request.values.get("duration", 2700))
+    interval = float(request.values.get("interval", 2))
+    threading.Thread(target=_nb_keepawake_worker,
+                     args=(mac, duration, interval), daemon=True).start()
+    time.sleep(1)
+    return jsonify(status="ok", started=True, duration=duration,
+                   interval=interval, **_keepawake)
+
+
+@app.get("/niimbot_keepawake")
+def niimbot_keepawake_status():
+    return jsonify(status="ok", **_keepawake)
+
+
+@app.post("/niimbot_keepawake_stop")
+def niimbot_keepawake_stop():
+    _keepawake["running"] = False
+    return jsonify(status="ok", **_keepawake)
+
+
 def _entity_state(entity_id):
     """Current state string of an entity (None if unavailable)."""
     try:

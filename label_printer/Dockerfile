@@ -14,7 +14,7 @@ RUN apt-get update \
 
 # flask + brother_ql + Pillow for printing; qrcode + python-barcode for the
 # designer's QR and barcode elements.
-RUN pip install --no-cache-dir flask brother_ql Pillow qrcode python-barcode
+RUN pip install --no-cache-dir flask brother_ql Pillow qrcode python-barcode bleak
 
 WORKDIR /app
 COPY print_server.py label_render.py custom_render.py /app/
