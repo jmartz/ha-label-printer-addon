@@ -1,65 +1,92 @@
-# Breast Milk Label Printer — Home Assistant add-on
+# Breast Milk / Fridge Label Printer — Home Assistant add-on
 
-Press a Tapo S200D button → Home Assistant prints a date/time + expiration
-label to your networked Brother QL-820NWB. The add-on runs entirely on your
-HA box and talks straight to the printer, so your PC doesn't need to be on.
+Press a button (or use your voice) → Home Assistant composes a date/time +
+expiration label and prints it. The add-on runs entirely on your HA box and
+talks straight to the printers, so no PC needs to be on.
+
+It now drives **two printers** from **three buttons plus voice**:
+
+- **Brother QL-820NWB** — networked thermal label printer in the kitchen
+  (TCP 9100, `brother_ql`, no driver). The "always there" printer.
+- **Niimbot B1** — battery/BLE portable printer at the pump station
+  (via the `hass-niimbot` integration). The "grab it and go" printer.
+
+## Who prints where
+
+| Trigger | Kind | Prints on | Behind the scenes |
+|---|---|---|---|
+| **"Refrigerator Button"** (LUMI Zigbee) | single-press | **Brother QL** | `zha_event` → `rest_command.print_milk_label` |
+| **"Breast Milk Printer Button"** (Aqara Zigbee) | single-press | **Niimbot B1** | `zha_event` → `rest_command.print_milk_label_niimbot` |
+| **M5Stack Dial** (ESPHome knob) | dial oz, then press | **Brother QL** | direct `POST /print?oz=<n>` to the add-on |
+| **Voice** (HA Assist / Gemini) | "print 2 labels at 4 oz" | **Brother QL** | intent → `print_milk_labels` event → copies + oz |
+
+> The original **Tapo S200D** button was the first trigger; it has been
+> retired in favour of the push-based Zigbee buttons (no ~2–5 s poll lag, and
+> no phantom-print risk from restored button state). The S200D device still
+> exists in HA but no longer has a print automation.
 
 ## Architecture
 
 ```
-[Tapo S200D]──868MHz──>[Tapo H100 hub]
-                              │  (HACS Tapo integration polls the hub)
-                              v
-                     [Home Assistant automation]
-                              │  rest_command: POST /print
-                              v
-              [This add-on: Flask + brother_ql]──TCP 9100──>[QL-820NWB]
+  [LUMI Zigbee btn] ─┐                         ┌─ TCP 9100 ─> [Brother QL-820NWB]
+  [M5Stack Dial] ────┼─> [Home Assistant] ─> [THIS ADD-ON: Flask + brother_ql]
+  [Voice / Assist] ──┘         │  rest_command / POST /print
+                               │
+  [Aqara Zigbee btn] ──────────┘─> [hass-niimbot integration] ─ BLE ─> [Niimbot B1]
 ```
 
-## One-time setup
+Both Zigbee buttons join through a **SONOFF ZBDongle-E** coordinator (ZHA).
+The Niimbot is reached over Bluetooth (the HA host's adapter, with an ESPHome
+BT proxy for range); the add-on parks a Niimbot label if the printer is asleep
+and reprints it on reconnect, so a press is never lost.
 
-### A. Install the add-on on your HA box
-1. Get the files onto HA. Install the **"Samba share"** add-on (or
-   **"Advanced SSH & Web Terminal"**), then copy this whole `label_printer`
-   folder into the `/addons` share. Result: `/addons/label_printer/`.
-2. **Settings → Add-ons → Add-on Store**, click the **⋮** menu →
-   **Check for updates**, then reload. A **Local add-ons** section appears
-   with **"Breast Milk Label Printer."**
-3. Open it → **Install** (first build takes a few minutes).
-4. **Configuration** tab → set `printer_ip` (currently `192.168.10.83`) and
-   `label` (`62` for your 62mm DK-4205 roll). Save.
-5. **Start** the add-on. Check the **Log** tab for `Running on
-   http://0.0.0.0:8099`. Enable **Start on boot** and **Watchdog**.
-6. Quick test from any computer on the LAN (replace with the HA IP):
-   ```
-   curl -X POST http://<HA_IP>:8099/print
-   ```
-   A label should print.
+## The `rest_command` endpoints (in `configuration.yaml`)
 
-### B. Expose the S200D button to HA
-The official TP-Link integration can't see button presses. Use the community
-integration:
-1. Install **HACS** if you don't have it.
-2. In HACS, add/install **"Tapo Controller"**
-   (`petretiandrea/home-assistant-tapo-p100`) and restart HA.
-3. Add the integration and sign in / point it at your **H100 hub**. Your
-   **S200D** shows up as a device that reports button-press and dial events.
-   (Note: it **polls**, so expect a ~2–5s delay; double-click isn't supported.)
+| Service | HTTP | Result |
+|---|---|---|
+| `rest_command.print_milk_label` | `POST /print` | Brother: universal fridge/milk label, no amount |
+| `rest_command.print_milk_label_oz` | `POST /print?oz={{oz}}` | Brother: label with "Amount: N oz" filled in |
+| `rest_command.print_milk_label_niimbot` | `POST /print?printer=niimbot` | Niimbot B1 label |
 
-### C. Wire up the automation
-1. Add the `rest_command` from `home-assistant-snippets.yaml` to your
-   `configuration.yaml` (use your **HA box's** LAN IP), and restart HA.
-2. Create the automation (see the snippet). Easiest: **Settings → Automations
-   → Create → Add Trigger → Device →** pick the S200D → **Pressed**, then
-   **Add Action → Call service → `rest_command.print_milk_label`**.
-3. Press the button. A label prints.
+There is also a **web-based label Designer** served by the add-on as an HA
+ingress sidebar panel ("Label Designer") for one-off custom labels — drag/drop
+text, QR, barcodes, symbols; exact on-screen preview; prints to the Brother.
+
+## One-time setup (summary)
+
+The add-on is installed from a **GitHub add-on repository**
+(`github.com/jmartz/ha-label-printer-addon`), so it survives HA backup
+restores automatically. To (re)install:
+
+1. **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, add the repo URL.
+2. Install **"Breast Milk Label Printer"**, open **Configuration**, set
+   `printer_ip` (the Brother QL, e.g. `192.168.10.120`) and `label` (`62` for
+   62 mm DK-4205). Save, **Start**, enable **Start on boot** + **Watchdog**.
+3. Quick test: `curl -X POST http://<HA_IP>:8099/print` → a label prints.
+
+### Adding a button trigger (Zigbee)
+1. **Settings → Devices & Services → ZHA → Add device**, then long-press the
+   new button (~5 s) to join.
+2. Add an automation: trigger **`zha_event`** with `device_ieee: <button IEEE>`
+   and `command: single`; action = the `rest_command` for the printer you want
+   (`print_milk_label` for Brother, `print_milk_label_niimbot` for Niimbot).
+3. Reload automations (Developer Tools → YAML → Reload Automations, or restart
+   Core). Press the button — a label prints.
+
+### Voice
+The `Voice: print breast milk label(s)` automation exposes an Assist intent:
+say e.g. *"print two labels at 4 ounces."* It parses the count (1–10) and
+optional oz, guards absurd amounts, and loops the Brother print. Works with the
+HA Voice PE hardware (wake word "Okay Nabu") or any Assist entry point.
 
 ## Notes
-- **Self-healing IP:** if the printer's DHCP address changes, the add-on
-  detects the unreachable IP, rescans the LAN for the QL printer, prints, and
-  caches the new IP in `/data/last_ip.txt`. Set a DHCP reservation if you
-  want to avoid even that one slow scan.
-- **Timezone:** the label uses the container clock. HA passes the host TZ to
-  add-ons; confirm your HA system timezone is correct so am/pm is right.
-- **Changing the label design** later: edit `print_server.py`'s
-  `build_label_image()` and restart the add-on (Supervisor rebuilds it).
+- **Self-healing IP (Brother):** if the printer's DHCP address changes, the
+  add-on rescans the LAN for the QL-820NWB, prints, and caches the new IP. A
+  DHCP reservation avoids even that one slow scan.
+- **Niimbot power:** charge the B1 over **USB-A** — its USB-C port often
+  negotiates to 0 W and drains while "plugged in." On adequate power it stays
+  awake and instantly printable; otherwise a wake-tap re-advertises it.
+- **Timezone:** the label uses the host clock passed to the add-on; confirm the
+  HA system timezone so am/pm is correct.
+- **Changing the label design:** edit `build_label_image()` in
+  `label_render.py` (fridge/milk label) and restart the add-on.
