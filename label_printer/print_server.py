@@ -54,6 +54,7 @@ NIIMBOT_LINE_WAIT_MS = 10       # ms pause between print lines
 NIIMBOT_CONFIRM_EVERY = 8       # confirm reception every N lines
 WATCHDOG_INTERVAL = 90          # seconds between orphaned-link checks
 WATCHDOG_STREAK = 2             # consecutive positives before acting (hysteresis)
+WATCHDOG_BACKOFF_MAX = 1800     # cap the retry gap when BlueZ is unreachable
 
 # Deferred printing. The B1 stops advertising when idle and Home Assistant
 # cannot wake it -- that needs a physical tap. Without this, pressing the button
@@ -375,16 +376,44 @@ def ble_disconnect(mac):
         return f"disconnect failed: {e}"
 
 
+class BlueZUnavailable(Exception):
+    """bluetoothctl could not reach BlueZ at all (daemon dead, no host_dbus)."""
+
+
+# Things bluetoothctl says when bluetoothd is not answering on the system bus.
+_BLUEZ_DOWN = ("waiting to connect to bluetoothd",
+               "failed to connect", "no default controller",
+               "connection is closed", "org.bluez was not provided")
+
+
 def ble_connected(mac):
-    """True if BlueZ currently holds a link to `mac`."""
+    """True if BlueZ currently holds a link to `mac`.
+
+    Raises BlueZUnavailable when bluetoothctl cannot reach BlueZ, so callers can
+    tell "there is no link" apart from "I could not ask". Collapsing those two
+    into False is what let the watchdog keep spawning bluetoothctl every 90 s
+    after bluetoothd died on 2026-09-09 -- and every bluetoothctl invocation
+    opens a fresh peer on the HOST system bus (this add-on sets host_dbus:true).
+    That loop helped exhaust dbus-broker's per-UID pool, which killed bluetoothd
+    and systemd-logind and left the host unable to start containers or reboot.
+    """
     if not mac:
         return False
     try:
         r = subprocess.run(["bluetoothctl", "info", mac],
                            capture_output=True, text=True, timeout=15)
-        return "Connected: yes" in (r.stdout or "")
-    except Exception:
-        return False
+    except FileNotFoundError as e:
+        raise BlueZUnavailable("bluetoothctl not installed") from e
+    except subprocess.TimeoutExpired as e:
+        # The usual shape when bluetoothd is gone: bluetoothctl blocks on
+        # "Waiting to connect to bluetoothd..." until we time it out.
+        raise BlueZUnavailable("bluetoothctl timed out (bluetoothd not answering)") from e
+    except Exception as e:
+        raise BlueZUnavailable(str(e)) from e
+    blob = ((r.stdout or "") + (r.stderr or "")).lower()
+    if any(s in blob for s in _BLUEZ_DOWN):
+        raise BlueZUnavailable("BlueZ not available on the system bus")
+    return "Connected: yes" in (r.stdout or "")
 
 
 # ----------------------------------------------------------------------
@@ -568,11 +597,18 @@ def niimbot_diagnose():
     cfg = load_config()
     mac = cfg.get("niimbot_mac")
     ent = cfg.get("niimbot_conn_entity") or "binary_sensor.niimbot_8ae8d0_connection"
-    connected = ble_connected(mac)
+    try:
+        connected = ble_connected(mac)
+        bluez_ok = True
+    except BlueZUnavailable:
+        # ble_connected is None, NOT False: we do not know. `orphan` below stays
+        # False either way, so we never cut a link on the strength of a failed
+        # probe -- but the watchdog can now see the difference and back off.
+        connected, bluez_ok = None, False
     ha_conn = _entity_state(ent)
     orphan = bool(connected and ha_conn == "off")
     return {"mac": mac, "ble_connected": connected, "ha_connected": ha_conn,
-            "conn_entity": ent, "orphaned": orphan}
+            "conn_entity": ent, "orphaned": orphan, "bluez_available": bluez_ok}
 
 
 @app.get("/niimbot_diag")
@@ -588,10 +624,25 @@ def _watchdog():
     cut a healthy link (that mistake caused constant connect/disconnect churn).
     """
     streak = 0
+    delay = WATCHDOG_INTERVAL
     while True:
-        time.sleep(WATCHDOG_INTERVAL)
+        time.sleep(delay)
         try:
             d = niimbot_diagnose()
+            if not d.get("bluez_available", True):
+                # BlueZ is down and cannot recover on its own. Probing it on a
+                # fixed 90 s cycle burns a host D-Bus peer per tick forever, so
+                # widen the gap instead (90s -> 3m -> 6m ... capped). One probe
+                # per cycle is still enough to notice when BlueZ comes back.
+                delay = min(delay * 2, WATCHDOG_BACKOFF_MAX)
+                streak = 0
+                print(f"[watchdog] BlueZ unavailable - next check in {delay}s",
+                      flush=True)
+                continue
+            if delay != WATCHDOG_INTERVAL:
+                print("[watchdog] BlueZ is back - resuming normal interval",
+                      flush=True)
+                delay = WATCHDOG_INTERVAL
             if not d["orphaned"]:
                 streak = 0
                 continue
