@@ -303,7 +303,9 @@ def niimbot_keepalive_set():
         # them would silently undo the print-speed tuning. So pin the tuned
         # values explicitly; only keep_connection is actually being toggled.
         opts.update({
-            "use_sound": True,
+            # Always silent: the B1 otherwise beeps on every BLE connect /
+            # disconnect (rising / falling tone), i.e. once a minute.
+            "use_sound": False,
             "scan_interval": NIIMBOT_SCAN_INTERVAL,
             "wait_between_each_print_line": NIIMBOT_LINE_WAIT_MS,
             "confirm_every_nth_print_line": NIIMBOT_CONFIRM_EVERY,
