@@ -25,6 +25,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+import websocket          # websocket-client
 from flask import Flask, Response, jsonify, request, send_from_directory
 from brother_ql.conversion import convert
 from brother_ql.backends.helpers import send
@@ -44,6 +45,42 @@ PRINT_PORT = 9100
 # `homeassistant_api: true` in config.yaml, which populates SUPERVISOR_TOKEN.
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
 CORE_API = "http://supervisor/core/api"
+# Service calls that need Home Assistant's real error text go over the websocket
+# API: REST answers a failed service with a bare "500 Internal Server Error",
+# which hid e.g. "Printer error: PaperOutException" from the add-on.
+CORE_WS = "ws://supervisor/core/websocket"
+
+
+class HAServiceError(Exception):
+    """A service call failed; the message is Home Assistant's own error text."""
+
+
+def _ws_call_service(domain, service, data, target, timeout=60):
+    """Call a HA service over the Core websocket API and return its result.
+
+    Raises HAServiceError carrying HA's message on failure, RuntimeError if the
+    websocket auth is rejected (configuration, not transient).
+    """
+    ws = websocket.create_connection(CORE_WS, timeout=timeout)
+    try:
+        json.loads(ws.recv())                                   # auth_required
+        ws.send(json.dumps({"type": "auth", "access_token": SUPERVISOR_TOKEN}))
+        msg = json.loads(ws.recv())
+        if msg.get("type") != "auth_ok":
+            raise RuntimeError(f"Core websocket auth failed: {msg}")
+        ws.send(json.dumps({"id": 1, "type": "call_service", "domain": domain,
+                            "service": service, "service_data": data,
+                            "target": target}))
+        while True:
+            msg = json.loads(ws.recv())
+            if msg.get("id") == 1 and msg.get("type") == "result":
+                break
+    finally:
+        ws.close()
+    if not msg.get("success"):
+        err = msg.get("error") or {}
+        raise HAServiceError(err.get("message") or json.dumps(err))
+    return msg.get("result")
 
 # Tuned hass-niimbot options. The stock defaults (600 / 50 / 1) make a 240-line
 # label take ~30 s; these cut it to ~6 s. Kept here because the options-flow
@@ -68,6 +105,8 @@ WATCHDOG_BACKOFF_MAX = 1800     # cap the retry gap when BlueZ is unreachable
 # labels at once is worse.
 NIIMBOT_PENDING_TTL = 1800      # drop a parked label after 30 min unprinted
 NIIMBOT_PENDING_POLL = 10       # seconds between "is it back yet?" checks
+NIIMBOT_PENDING_RETRY_GAP = 30  # min seconds between actual reprint attempts
+NIIMBOT_POLL_FRESH = 90         # conn sensor changed this recently = polls working
 
 # Where we remember a freshly-discovered IP between runs (HA add-on data dir).
 IP_CACHE = "/data/last_ip.txt"
@@ -286,12 +325,23 @@ def niimbot_keepalive_get():
 
 @app.post("/niimbot_keepalive")
 def niimbot_keepalive_set():
-    """Turn the integration's Keep-BLE-Connection option on/off (?enable=1|0).
+    """Re-assert the integration's tuned options (silent, fast print, 60 s poll).
 
-    'enable' (not 'on') because YAML would coerce on/off into booleans.
+    Keep-BLE-Connection is pinned OFF. hass-niimbot 2.2.1 gates every poll AND
+    every print on bluetooth.async_ble_device_from_address(), i.e. on having
+    heard a recent advertisement -- and a B1 holding a connection stops
+    advertising. So with the link held, HA eventually decides the printer is
+    gone and every print fails while the connection sensor still says "on".
+    (Tried 2026-09 and 2026-10-05; both times prints silently died within hours.)
+    'enable=1' is therefore refused rather than honoured.
     """
-    want = str(request.values.get("enable", "1")).strip().lower() in (
+    want = str(request.values.get("enable", "0")).strip().lower() in (
         "1", "true", "on", "yes")
+    if want:
+        return jsonify(status="error", error=(
+            "keep_connection=true is not supported: hass-niimbot 2.2.1 needs the "
+            "B1 to be advertising to print, and a held connection stops it "
+            "advertising. Left off.")), 409
     if not SUPERVISOR_TOKEN:
         return jsonify(status="error",
                        error="no SUPERVISOR_TOKEN (needs homeassistant_api)"), 503
@@ -584,6 +634,18 @@ def _entity_state(entity_id):
         return None
 
 
+def _entity_changed_age(entity_id):
+    """Seconds since an entity's state last changed (None if unknown)."""
+    try:
+        lc = (_core_req(f"/states/{entity_id}") or {}).get("last_changed")
+        if not lc:
+            return None
+        return (datetime.now(timezone.utc)
+                - datetime.fromisoformat(lc)).total_seconds()
+    except Exception:
+        return None
+
+
 def niimbot_diagnose():
     """Is a stale BlueZ link holding the printer hostage?
 
@@ -716,6 +778,7 @@ def _pending_flusher():
     churn the log and the BLE stack every few seconds for half an hour.
     """
     global _pending
+    last_try = 0.0
     while True:
         time.sleep(NIIMBOT_PENDING_POLL)
         try:
@@ -733,8 +796,17 @@ def _pending_flusher():
             cfg = load_config()
             ent = (cfg.get("niimbot_conn_entity")
                    or "binary_sensor.breast_milk_printer_niimbot_connection")
-            if _entity_state(ent) != "on":
+            # With keep_connection off the connection sensor flips on->off once
+            # per successful 60 s poll and reads "on" for only 1-3 s, so waiting
+            # to SEE "on" from a 10 s loop mostly missed it (labels sat parked
+            # until they expired). A recent flip means polls are reaching the
+            # B1, which is all a print needs -- it opens its own connection.
+            age = _entity_changed_age(ent)
+            if age is None or age > NIIMBOT_POLL_FRESH:
                 continue
+            if time.time() - last_try < NIIMBOT_PENDING_RETRY_GAP:
+                continue
+            last_try = time.time()
 
             with _pending_lock:
                 job = _pending
@@ -790,7 +862,8 @@ def print_niimbot(img, spec, _retry=True):
     base64 PNG data-URI), so what prints is pixel-identical to the designer --
     imagespec just blits it. Requires the add-on's SUPERVISOR_TOKEN (granted by
     homeassistant_api) and a configured niimbot_device_id. Returns a label for
-    logging; raises RuntimeError on missing config, propagates HTTP errors.
+    logging; raises RuntimeError on missing config / websocket auth, and
+    HAServiceError with HA's own message when the print itself fails.
     """
     cfg = load_config()
     device_id = cfg.get("niimbot_device_id")
@@ -804,8 +877,7 @@ def print_niimbot(img, spec, _retry=True):
     img.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     W, H = img.width, img.height
-    body = {
-        "device_id": device_id,
+    data = {
         "width": W,
         "height": H,
         "density": int(spec.get("density", 3)),
@@ -816,18 +888,13 @@ def print_niimbot(img, spec, _retry=True):
             "url": f"data:image/png;base64,{b64}",
         }],
     }
-    req = urllib.request.Request(
-        f"{CORE_API}/services/niimbot/print",
-        data=json.dumps(body).encode(),
-        method="POST",
-        headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}",
-                 "Content-Type": "application/json"},
-    )
     # BLE connect + print can take several seconds; the service call blocks until
     # the print finishes, so allow a generous timeout.
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            resp.read()
+        _ws_call_service("niimbot", "print", data, {"device_id": device_id},
+                         timeout=60)
+    except RuntimeError:
+        raise                    # websocket auth / config problem -- not transient
     except Exception as e:
         # Out of labels: a BLE reconnect can't fix that, so don't churn the
         # link -- surface it so the caller parks with a clear "paper_out" reason.
@@ -836,12 +903,16 @@ def print_niimbot(img, spec, _retry=True):
             raise
         if not _retry:
             raise
-        # Almost always an orphaned BlueZ link holding the printer's only
-        # connection slot: clear it and try once more, so this self-heals
-        # instead of needing a human with an SSH session.
-        res = ble_disconnect(cfg.get("niimbot_mac"))
-        print(f"Print failed ({e}); cleared stale BLE link: {res}; retrying",
-              flush=True)
+        if "could not find printer" in str(e).lower():
+            # HA hasn't heard it advertise: asleep or out of range. There is
+            # no link to clear; one quick retry in case an advert was just late.
+            note = "printer not advertising (asleep / out of range)"
+        else:
+            # Possibly an orphaned BlueZ link holding the printer's only
+            # connection slot: clear it and try once more, so this self-heals
+            # instead of needing a human with an SSH session.
+            note = f"cleared BLE link: {ble_disconnect(cfg.get('niimbot_mac'))}"
+        print(f"Print failed ({e}); {note}; retrying", flush=True)
         time.sleep(3)
         return print_niimbot(img, spec, _retry=False)
     return f"Niimbot B1 ({device_id[:8]}…)"
