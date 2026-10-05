@@ -596,7 +596,7 @@ def niimbot_diagnose():
     """
     cfg = load_config()
     mac = cfg.get("niimbot_mac")
-    ent = cfg.get("niimbot_conn_entity") or "binary_sensor.niimbot_8ae8d0_connection"
+    ent = cfg.get("niimbot_conn_entity") or "binary_sensor.breast_milk_printer_niimbot_connection"
     try:
         connected = ble_connected(mac)
         bluez_ok = True
@@ -667,14 +667,29 @@ _pending_lock = threading.Lock()
 _pending = None          # {"img", "spec", "text", "oz", "created", "attempts"}
 
 
-def _park_pending(img, spec, text, oz):
-    """Hold a label that couldn't print, replacing any previous one."""
+def _is_paper_out(e):
+    """True if an exception is the printer reporting no paper loaded."""
+    s = str(e).lower()
+    return "paperout" in s or "paper out" in s or "paper_out" in s
+
+
+def _park_pending(img, spec, text, oz, reason="unreachable"):
+    """Hold a label that couldn't print, replacing any previous one.
+
+    `reason` is "paper_out" (the B1 reported no labels) or "unreachable"
+    (asleep / out of range / BLE wedged); it is surfaced on /niimbot_pending so
+    a notification can say which.
+    """
     global _pending
     with _pending_lock:
         replaced = _pending["text"] if _pending else None
         _pending = {"img": img, "spec": spec, "text": text, "oz": oz,
-                    "created": time.time(), "attempts": 1}
-    if replaced:
+                    "created": time.time(), "attempts": 1, "reason": reason}
+    if reason == "paper_out":
+        print(f"[pending] parked '{text}' -- B1 is OUT OF PAPER; will print once "
+              f"a roll is loaded (expires in {NIIMBOT_PENDING_TTL // 60} min)",
+              flush=True)
+    elif replaced:
         print(f"[pending] replaced parked label '{replaced}' with '{text}'", flush=True)
     else:
         print(f"[pending] parked '{text}' -- will print when the B1 reconnects "
@@ -687,7 +702,8 @@ def _pending_snapshot():
             return None
         return {"text": _pending["text"], "oz": _pending["oz"],
                 "age_s": int(time.time() - _pending["created"]),
-                "attempts": _pending["attempts"]}
+                "attempts": _pending["attempts"],
+                "reason": _pending.get("reason", "unreachable")}
 
 
 def _pending_flusher():
@@ -714,7 +730,7 @@ def _pending_flusher():
 
             cfg = load_config()
             ent = (cfg.get("niimbot_conn_entity")
-                   or "binary_sensor.niimbot_8ae8d0_connection")
+                   or "binary_sensor.breast_milk_printer_niimbot_connection")
             if _entity_state(ent) != "on":
                 continue
 
@@ -811,6 +827,11 @@ def print_niimbot(img, spec, _retry=True):
         with urllib.request.urlopen(req, timeout=60) as resp:
             resp.read()
     except Exception as e:
+        # Out of labels: a BLE reconnect can't fix that, so don't churn the
+        # link -- surface it so the caller parks with a clear "paper_out" reason.
+        if _is_paper_out(e):
+            print(f"Niimbot print failed: OUT OF PAPER ({e})", flush=True)
+            raise
         if not _retry:
             raise
         # Almost always an orphaned BlueZ link holding the printer's only
@@ -840,12 +861,13 @@ def do_print():
             except RuntimeError:
                 raise            # misconfiguration -- parking would never succeed
             except Exception as e:
-                # Printer asleep or out of range. Keep the label (rendered NOW,
-                # so it carries the time you actually pressed the button) and
-                # print it when the B1 comes back.
-                _park_pending(img, spec, header_text, oz)
+                # Out of paper, asleep, or out of range. Keep the label (rendered
+                # NOW, so it carries the time you actually pressed the button) and
+                # print it when the B1 can -- surfacing why it is waiting.
+                reason = "paper_out" if _is_paper_out(e) else "unreachable"
+                _park_pending(img, spec, header_text, oz, reason=reason)
                 return jsonify(status="pending", printed=header_text, oz=oz,
-                               printer=printer, reason=str(e),
+                               printer=printer, reason=reason, detail=str(e),
                                ttl_s=NIIMBOT_PENDING_TTL), 202
         else:
             img, header_text = build_label_image(now, oz)
