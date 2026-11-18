@@ -248,6 +248,18 @@ def health():
     return jsonify(status="ok")
 
 
+@app.get("/ql_status")
+def ql_status_route():
+    """What the Brother QL reports right now, and whether a print would go."""
+    try:
+        ip = resolve_printer_ip(load_config()["printer_ip"])
+    except RuntimeError as e:
+        return jsonify(status="error", error=str(e)), 503
+    st = ql_status(ip)
+    return jsonify(status="ok", printer_ip=ip, ql=st,
+                   problem=ql_problem(st, expect_label=load_config()["label"]))
+
+
 # ----------------------------------------------------------------------
 # Niimbot "keep BLE connection" toggle
 # ----------------------------------------------------------------------
