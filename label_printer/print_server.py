@@ -13,6 +13,7 @@ find the QL on the LAN and send the raster.
 """
 
 import base64
+import html
 import io
 import json
 import os
@@ -418,7 +419,8 @@ QL_POSTCHECK_POLL = 1.0
 
 
 def _strip_tags(s):
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s)).strip()
+    # The QL's pages encode spaces as "&#32;" ("Device&#32;Status").
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", s))).strip()
 
 
 def ql_status(ip):
@@ -427,11 +429,11 @@ def ql_status(ip):
     {"device": "READY", "level": "ok"|"warning"|"error", "emulation": "Raster",
      "media": "Not Empty", "media_type": "62mm / 2.4\""}
     """
-    html = _fetch(f"http://{ip}/general/status.html", n=40000)
-    if not html:
+    page = _fetch(f"http://{ip}/general/status.html", n=40000)
+    if not page:
         return None
     fields = {}
-    for dt, dd in re.findall(r"<dt[^>]*>(.*?)</dt>\s*<dd[^>]*>(.*?)</dd>", html,
+    for dt, dd in re.findall(r"<dt[^>]*>(.*?)</dt>\s*<dd[^>]*>(.*?)</dd>", page,
                              re.DOTALL | re.IGNORECASE):
         fields[_strip_tags(dt).lower()] = dd
     dev_html = fields.get("device status", "")
