@@ -387,14 +387,91 @@ def _parse_oz():
         return None
 
 
+# ----------------------------------------------------------------------
+# QL status. brother_ql's network backend is write-only (send() returns
+# 'outcome': 'sent' without reading anything back), so a QL that silently
+# discards a job -- wrong command mode, out of labels, cover open -- still
+# looked like a successful print. The QL's own status page is readable without
+# logging in, so we check it before and after every job.
+# ----------------------------------------------------------------------
+
+class PrinterNotReady(Exception):
+    """The QL is reachable but reports it can't (or didn't) print."""
+
+
+# Device Status values that mean "fine" (case-insensitive prefix match).
+_QL_OK_STATES = ("ready", "sleep", "printing", "busy", "waiting", "cooling")
+QL_POSTCHECK_S = 8          # how long to watch the printer after a job
+QL_POSTCHECK_POLL = 1.0
+
+
+def _strip_tags(s):
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s)).strip()
+
+
+def ql_status(ip):
+    """Read the QL's status page. Returns a dict, or None if it didn't answer.
+
+    {"device": "READY", "level": "ok"|"warning"|"error", "emulation": "Raster",
+     "media": "Not Empty", "media_type": "62mm / 2.4\""}
+    """
+    html = _fetch(f"http://{ip}/general/status.html", n=40000)
+    if not html:
+        return None
+    fields = {}
+    for dt, dd in re.findall(r"<dt[^>]*>(.*?)</dt>\s*<dd[^>]*>(.*?)</dd>", html,
+                             re.DOTALL | re.IGNORECASE):
+        fields[_strip_tags(dt).lower()] = dd
+    dev_html = fields.get("device status", "")
+    m = re.search(r'class="[^"]*moni(Ok|Warning|Warn|Error|Err)[^"]*"', dev_html, re.I)
+    level = {"ok": "ok", "warning": "warning", "warn": "warning",
+             "error": "error", "err": "error"}.get((m.group(1) if m else "").lower(), "")
+    return {
+        "device": _strip_tags(dev_html),
+        "level": level,
+        "emulation": _strip_tags(fields.get("emulation", "")),
+        "media": _strip_tags(fields.get("media status", "")),
+        "media_type": _strip_tags(fields.get("media type", "")),
+    }
+
+
+def ql_problem(st, expect_label=None):
+    """Human-readable reason the QL can't print, or None if it looks fine."""
+    if st is None:
+        return None              # status page didn't answer -- don't block on it
+    if st["emulation"] and st["emulation"].lower() != "raster":
+        return (f"printer is in '{st['emulation']}' command mode, not Raster "
+                "-- it will silently ignore jobs")
+    if st["media"] and st["media"].lower() != "not empty":
+        return f"printer reports media: {st['media']} (out of labels?)"
+    dev = st["device"]
+    if st["level"] == "error" or (dev and not dev.lower().startswith(_QL_OK_STATES)):
+        return f"printer status: {dev or 'unknown error'}"
+    # Only for continuous rolls ("62"), whose page text is "62mm / 2.4\"";
+    # die-cut codes ("62x29") are formatted differently, so skip those.
+    if (expect_label and str(expect_label).isdigit() and st["media_type"]
+            and not st["media_type"].startswith(f"{expect_label}mm")):
+        return (f"wrong roll loaded: printer has {st['media_type']}, "
+                f"job is for {expect_label}mm")
+    return None
+
+
 def print_image(img, label_code):
     """Send a PIL image to the QL on the given brother_ql media code.
 
-    Returns the printer IP on success; raises RuntimeError if the printer can't
-    be found and propagates send() errors to the caller.
+    Checks the printer's status page before sending (refuses if it's in the
+    wrong mode, out of labels, cover open, wrong roll...) and watches it for a
+    few seconds afterwards for an error. Returns the printer IP on success;
+    raises RuntimeError if the printer can't be found, PrinterNotReady if it
+    reports a problem, and propagates send() errors.
     """
     cfg = load_config()
     ip = resolve_printer_ip(cfg["printer_ip"])
+
+    problem = ql_problem(ql_status(ip), expect_label=label_code)
+    if problem:
+        raise PrinterNotReady(f"Not printed: {problem}")
+
     qlr = BrotherQLRaster(MODEL)
     qlr.exception_on_warning = True
     instructions = convert(
@@ -404,7 +481,43 @@ def print_image(img, label_code):
     )
     send(instructions=instructions, printer_identifier=f"tcp://{ip}",
          backend_identifier="network", blocking=True)
+
+    # Post-check: an empty roll, jam or open cover shows up within a second or
+    # two of the job. Stop early once we've seen it settle back to READY.
+    deadline = time.time() + QL_POSTCHECK_S
+    seen_ready_after = False
+    time.sleep(1.5)
+    while time.time() < deadline:
+        st = ql_status(ip)
+        problem = ql_problem(st)
+        if problem:
+            raise PrinterNotReady(f"Print may have failed: {problem}")
+        if st and st["device"].lower().startswith("ready"):
+            if seen_ready_after:
+                break
+            seen_ready_after = True
+        time.sleep(QL_POSTCHECK_POLL)
     return ip
+
+
+def notify_print_failed(printer, error, oz=None, source=None):
+    """Fire a `label_printer_failed` event in HA so an automation can alert.
+
+    Every caller (M5Dial, Zigbee buttons, voice, designer) goes through here,
+    so one automation covers them all. Best-effort: never raises.
+    """
+    if not SUPERVISOR_TOKEN:
+        return
+    body = json.dumps({"printer": printer, "error": error, "oz": oz,
+                       "source": source}).encode()
+    req = urllib.request.Request(
+        f"{CORE_API}/events/label_printer_failed", data=body, method="POST",
+        headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}",
+                 "Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=5).read()
+    except Exception as e:
+        print(f"Couldn't fire label_printer_failed event: {e}", flush=True)
 
 
 def ble_disconnect(mac):
@@ -945,9 +1058,17 @@ def do_print():
         else:
             img, header_text = build_label_image(now, oz)
             dest = print_image(img, load_config()["label"])
+    except PrinterNotReady as e:
+        print(f"Brother QL: {e}", flush=True)
+        notify_print_failed(printer, str(e), oz, request.remote_addr)
+        return jsonify(status="error", error=str(e)), 409
     except RuntimeError as e:
+        print(f"Print failed: {e}", flush=True)
+        notify_print_failed(printer, str(e), oz, request.remote_addr)
         return jsonify(status="error", error=str(e)), 503
     except Exception as e:
+        print(f"Print failed: {e}", flush=True)
+        notify_print_failed(printer, str(e), oz, request.remote_addr)
         return jsonify(status="error", error=str(e)), 502
 
     print(f"Printed '{header_text}'{f' ({oz:.1f} oz)' if oz is not None else ''} "
@@ -1048,6 +1169,9 @@ def print_custom():
         dest = send_one()                            # first copy
         for _ in range(copies - 1):
             send_one()
+    except PrinterNotReady as e:
+        print(f"Brother QL: {e}", flush=True)
+        return jsonify(status="error", error=str(e)), 409
     except RuntimeError as e:
         return jsonify(status="error", error=str(e)), 503
     except Exception as e:

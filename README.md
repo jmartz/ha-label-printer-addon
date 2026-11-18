@@ -90,3 +90,17 @@ HA Voice PE hardware (wake word "Okay Nabu") or any Assist entry point.
   HA system timezone so am/pm is correct.
 - **Changing the label design:** edit `build_label_image()` in
   `label_render.py` (fridge/milk label) and restart the add-on.
+
+## Print confirmation (Brother QL)
+
+brother_ql's network backend is write-only, so the QL can silently drop a job
+(wrong command mode, out of labels, cover open) while the add-on reports
+success. Since 3.8.0 every Brother job checks the QL's status page
+(`/general/status.html`, no login needed) before sending and for ~8 s after:
+
+- Not in **Raster** mode, media not loaded, cover open/jam, or the wrong roll
+  -> the job is refused / reported failed with **HTTP 409** and a plain reason.
+- Any failed print (Brother or Niimbot, any caller) fires a
+  `label_printer_failed` event in HA (`printer`, `error`, `oz`, `source`) --
+  the automation "Label printer - alert when a print fails" turns that into a
+  phone notification.
